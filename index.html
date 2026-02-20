@@ -133,6 +133,7 @@
       background: var(--bg2);
       cursor: pointer;
       text-decoration: none;
+      display: grid;
       color: inherit;
       transition: border-color 0.15s, background 0.15s;
       position: relative;
@@ -217,6 +218,7 @@
       font-size: 0.72rem;
       color: var(--green);
       text-decoration: none;
+      display: grid;
       opacity: 0.8;
       border-bottom: 1px dashed var(--dim);
       padding-bottom: 1px;
@@ -301,50 +303,18 @@
     <div class="scripts">
 
       <!-- mpl -->
-      <div class="script-item" onclick="toggleSubmenu('mpl')">
+      <a class="script-item" href="https://raw.githubusercontent.com/pl-ie/scripts-and-tips/main/mpl" target="_blank">
         <span class="script-name">mpl</span>
         <span class="script-desc">Media Playlist Player — queue, shuffle, live refresh</span>
         <span class="script-tag">bash</span>
-      </div>
-      <div class="submenu" id="sub-mpl">
-        <div class="submenu-row"><span class="key">a</span> play all files in directory</div>
-        <div class="submenu-row"><span class="key">s</span> shuffle playlist</div>
-        <div class="submenu-row"><span class="key">u</span> refresh playlist without losing position</div>
-        <div class="submenu-row"><span class="key">n/b</span> next / previous track</div>
-        <div class="submenu-row"><span class="key">,/.</span> seek −10 / +10 seconds</div>
-        <div class="submenu-row"><span class="key">q</span> back to menu</div>
-        <div class="submenu-links">
-          <a href="https://github.com/pl-ie/scripts-and-tips/blob/main/mpl" target="_blank">→ GitHub</a>
-          <a href="https://raw.githubusercontent.com/pl-ie/scripts-and-tips/main/mpl" target="_blank">→ Raw</a>
-        </div>
-        <div class="install-block" onclick="copyInstall(event,'mpl-install')" id="mpl-install"
-             data-cmd="curl -o ~/.local/bin/mpl https://raw.githubusercontent.com/pl-ie/scripts-and-tips/main/mpl && chmod +x ~/.local/bin/mpl">
-          $ curl -o ~/.local/bin/mpl https://raw.githubusercontent.com/pl-ie/scripts-and-tips/main/mpl &amp;&amp; chmod +x ~/.local/bin/mpl
-          <span class="copy-hint">click to copy</span>
-        </div>
-      </div>
+      </a>
 
       <!-- mtp -->
-      <div class="script-item" onclick="toggleSubmenu('mtp')">
+      <a class="script-item" href="https://raw.githubusercontent.com/pl-ie/scripts-and-tips/main/mtp" target="_blank">
         <span class="script-name">mtp</span>
         <span class="script-desc">Media Tail Parts — stream files while downloading</span>
         <span class="script-tag">bash</span>
-      </div>
-      <div class="submenu" id="sub-mtp">
-        <div class="submenu-row"><span class="key">—</span> auto-detects newest .part or media file</div>
-        <div class="submenu-row"><span class="key">—</span> waits for 1 MB buffer before playback</div>
-        <div class="submenu-row"><span class="key">—</span> shows MB downloaded during playback</div>
-        <div class="submenu-row"><span class="key">—</span> saves resume position (watch_later)</div>
-        <div class="submenu-links">
-          <a href="https://github.com/pl-ie/scripts-and-tips/blob/main/mtp" target="_blank">→ GitHub</a>
-          <a href="https://raw.githubusercontent.com/pl-ie/scripts-and-tips/main/mtp" target="_blank">→ Raw</a>
-        </div>
-        <div class="install-block" onclick="copyInstall(event,'mtp-install')" id="mtp-install"
-             data-cmd="curl -o ~/.local/bin/mtp https://raw.githubusercontent.com/pl-ie/scripts-and-tips/main/mtp && chmod +x ~/.local/bin/mtp">
-          $ curl -o ~/.local/bin/mtp https://raw.githubusercontent.com/pl-ie/scripts-and-tips/main/mtp &amp;&amp; chmod +x ~/.local/bin/mtp
-          <span class="copy-hint">click to copy</span>
-        </div>
-      </div>
+      </a>
 
     </div>
   </div><!-- /category media -->
@@ -374,14 +344,5 @@
   </div>
 
 </div>
-
-<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
-  function toggleSubmenu(id) {
-    const el = document.getElementById('sub-' + id);
-    if (!el) return;
-    el.classList.toggle('open');
-  }
-
-  function copyInstall(e, id) {
-    e.stopPropagation();
-    const el = document.getElementById(i
+</body>
+</html>
