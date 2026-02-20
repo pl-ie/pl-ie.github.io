@@ -1,0 +1,155 @@
+#!/bin/bash
+# mtp (media tail parts) - play .part files while they are still downloading
+#
+# Usage:
+#   mtp              - auto-detect newest .part or media file in current directory
+#   mtp <file>       - play a specific file
+
+# === COLORS ===
+G='\033[1;32m'
+Y='\033[1;33m'
+C='\033[1;36m'
+M='\033[1;35m'
+R='\033[0m'
+
+# === FILE SELECTION ===
+# If an argument is provided - use it, otherwise find the newest file
+
+if [ -n "$1" ]; then
+    # Specific file passed as argument
+    PART_FILE="$1"
+    if [ ! -f "$PART_FILE" ]; then
+        echo -e "${Y}❌ File not found: $PART_FILE${R}"
+        exit 1
+    fi
+    echo -e "${C}📂 Using file from argument${R}"
+else
+    # No argument - find the newest media file
+    # Priority: .part files (actively downloading), then finished formats
+    PART_FILE=$(ls -t *.part 2>/dev/null | head -1)
+
+    if [ -z "$PART_FILE" ]; then
+        # No .part files found - look for completed media files
+        PART_FILE=$(ls -t *.{mp4,mkv,webm,avi,mp3,opus,ogg,m4a,flac,wav} 2>/dev/null | head -1)
+    fi
+
+    if [ -z "$PART_FILE" ]; then
+        echo -e "${Y}❌ No media files found in current directory${R}"
+        exit 1
+    fi
+    echo -e "${C}📂 Auto-selected newest file${R}"
+fi
+
+# === WATCH LATER SETUP ===
+# Different resume logic for .part (downloading) vs completed files
+
+WATCH_LATER_BASE="$HOME/.config/mpv/watch_later"
+mkdir -p "$WATCH_LATER_BASE"
+
+if [[ "$PART_FILE" == *.part ]]; then
+    # Downloading files share a single subfolder
+    # Position may shift as file grows - treated as temporary
+    SESSION_DIR="$WATCH_LATER_BASE/downloading"
+    echo -e "${Y}📥 Mode: Downloading (.part file)${R}"
+    echo -e "${C}   Position saved temporarily (may shift as file grows)${R}"
+else
+    # Completed files get a unique session ID based on modification timestamp
+    # Timestamp is stable, so resume position is reliably preserved
+    MTIME=$(stat -f%m "$PART_FILE" 2>/dev/null || stat -c%Y "$PART_FILE" 2>/dev/null)
+    PART_FILE_SAFE=$(echo "$PART_FILE" | tr '/' '_' | tr ' ' '_')
+    UNIQUE_SESSION="${PART_FILE_SAFE}_${MTIME}"
+    SESSION_DIR="$WATCH_LATER_BASE/completed/$UNIQUE_SESSION"
+    echo -e "${G}✅ Mode: Completed file${R}"
+fi
+
+mkdir -p "$SESSION_DIR"
+
+# === RESUME POSITION CHECK ===
+# Show saved position if one exists for this session
+
+SAVED_FILES=$(find "$SESSION_DIR" -type f 2>/dev/null | head -1)
+if [ -n "$SAVED_FILES" ]; then
+    SAVED_POS=$(grep "^start=" "$SAVED_FILES" 2>/dev/null | cut -d'=' -f2)
+    if [ -n "$SAVED_POS" ]; then
+        SAVED_MIN=$(echo "scale=0; $SAVED_POS / 60" | bc 2>/dev/null || echo "0")
+        SAVED_SEC=$(echo "scale=0; $SAVED_POS % 60" | bc 2>/dev/null || echo "0")
+        echo -e "${G}💾 Saved position found:${R} ${SAVED_MIN}m ${SAVED_SEC}s"
+        echo -e "${C}   Playback will resume from this point${R}"
+    fi
+fi
+
+# === SIZE CHECK ===
+SIZE=$(stat -f%z "$PART_FILE" 2>/dev/null || stat -c%s "$PART_FILE" 2>/dev/null)
+SIZE_MB=$(echo "scale=2; $SIZE / 1048576" | bc)
+
+echo -e "${C}═══════════════════════════════════════════════${R}"
+echo -e "${G}🎵 Streaming:${R} $PART_FILE"
+echo -e "${C}═══════════════════════════════════════════════${R}"
+echo -e "${M}📊 Current size:${R} ${SIZE_MB} MB"
+
+# === BUFFER WAIT ===
+# Only wait for minimum size on .part files
+
+if [[ "$PART_FILE" == *.part ]]; then
+    echo -e "${Y}⏳ Waiting for minimum buffer: 1 MB${R}"
+
+    while [ "$SIZE" -lt 1048576 ]; do
+        sleep 1
+        SIZE=$(stat -f%z "$PART_FILE" 2>/dev/null || stat -c%s "$PART_FILE" 2>/dev/null)
+        SIZE_MB=$(echo "scale=2; $SIZE / 1048576" | bc)
+        echo -ne "\r${M}📊 Size:${R} ${SIZE_MB} MB  "
+    done
+
+    echo -e "\n${G}✅ Minimum buffer reached: ${SIZE_MB} MB${R}"
+else
+    echo -e "${G}✅ File complete - starting without wait${R}"
+fi
+
+# === PLAYBACK START ===
+SIZE_BEFORE=$(stat -f%z "$PART_FILE" 2>/dev/null || stat -c%s "$PART_FILE" 2>/dev/null)
+SIZE_BEFORE_MB=$(echo "scale=2; $SIZE_BEFORE / 1048576" | bc)
+
+echo -e "${C}═══════════════════════════════════════════════${R}"
+echo -e "${G}📺 Size at start:${R} ${SIZE_BEFORE_MB} MB"
+echo -e "${Y}🎬 Launching playback...${R}"
+echo -e "${C}═══════════════════════════════════════════════${R}"
+
+# Launch mpv with streaming-optimized options
+mpv \
+    --demuxer-lavf-o=fflags=+nobuffer+fastseek \
+    --demuxer-readahead-secs=1 \
+    --cache=yes \
+    --cache-secs=10 \
+    --demuxer-max-bytes=50M \
+    --demuxer-max-back-bytes=20M \
+    --stream-buffer-size=2M \
+    --hr-seek=yes \
+    --hr-seek-demuxer-offset=0 \
+    --save-position-on-quit \
+    --resume-playback \
+    --watch-later-directory="$SESSION_DIR" \
+    --title="Streaming: $PART_FILE" \
+    "$PART_FILE"
+
+EXIT_CODE=$?
+
+# === PLAYBACK SUMMARY ===
+echo ""
+if [ $EXIT_CODE -eq 0 ]; then
+    echo -e "${G}✅ Playback finished${R}"
+else
+    echo -e "${Y}⚠️  Playback interrupted (exit code: $EXIT_CODE)${R}"
+fi
+
+# Show how much was downloaded during playback
+SIZE_AFTER=$(stat -f%z "$PART_FILE" 2>/dev/null || stat -c%s "$PART_FILE" 2>/dev/null)
+SIZE_AFTER_MB=$(echo "scale=2; $SIZE_AFTER / 1048576" | bc)
+SIZE_DIFF=$(echo "scale=2; $SIZE_AFTER - $SIZE_BEFORE" | bc)
+SIZE_DIFF_MB=$(echo "scale=2; $SIZE_DIFF / 1048576" | bc)
+
+echo -e "${C}═══════════════════════════════════════════════${R}"
+echo -e "${M}📊 Size at end:${R} ${SIZE_AFTER_MB} MB"
+if [ "$SIZE_DIFF" != "0" ]; then
+    echo -e "${G}📈 Downloaded during playback:${R} +${SIZE_DIFF_MB} MB"
+fi
+echo -e "${C}═══════════════════════════════════════════════${R}"
