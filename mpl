@@ -91,12 +91,12 @@ _show_header() {
     echo -e "${C}____________________________________________________________${R}"
     echo -e "${C}  MPL PRO v2.9.0 | OFFLINE PLAYER                          ${R}"
     echo -e "${C}____________________________________________________________${R}"
-    echo -e "${Y}  9 / 0     : Volume down / up                             ${R}"
-    echo -e "${Y}  , / .     : Seek -10 / +10 seconds                       ${R}"
-    echo -e "${Y}  n / b     : Next / Previous track                        ${R}"
-    echo -e "${Y}  SPACE     : Pause | s: Shuffle loop                      ${R}"
-    echo -e "${Y}  r: Restart track | q: Back to menu                       ${R}"
-    echo -e "${Y}  u: Refresh playlist (keeps position)                     ${R}"
+    echo -e "${Y}  9 / 0  : Volume down / up              ${R}"
+    echo -e "${Y}  , / .  : Seek -10 / +10 sec             ${R}"
+    echo -e "${Y}  n / b  : Next / Previous               ${R}"
+    echo -e "${Y}  SPACE  : Pause | s: Shuffle            ${R}"
+    echo -e "${Y}  r: Restart | q: Menu                   ${R}"
+    echo -e "${Y}  u: Refresh playlist                    ${R}"
     echo -e "${C}____________________________________________________________${R}"
 }
 
