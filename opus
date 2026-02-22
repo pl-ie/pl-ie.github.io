@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+
+# Script converts audio files (m4a, mp4, 3gp, webm, wav) to opus format
+# Uses the same parameters as the original script for wav
+
+# Check if a directory was provided as an argument, if not - use current directory
+DIR="${1:-.}"
+
+# Navigate to the directory
+cd "$DIR" || { echo "Cannot navigate to directory: $DIR"; exit 1; }
+
+# Formats to convert
+FORMATS=("mp3" "m4a" "mp4" "3gp" "webm" "wav")
+
+# Counters
+total_converted=0
+total_skipped=0
+total_errors=0
+
+echo "Starting audio file conversion to opus..."
+echo "Parameters: mono, 32k bitrate, metadata preservation"
+echo ""
+
+# Process each format
+for format in "${FORMATS[@]}"; do
+    for file in *."$format"; do
+        # Check if the file exists
+        [[ -f "$file" ]] || continue
+
+        # Get the name without extension
+        basename="${file%.$format}"
+        output_file="${basename}.opus"
+        
+        # Check if the target file already exists
+        if [[ -f "$output_file" ]]; then
+            echo "SKIPPED: $file (file $output_file already exists)"
+            ((total_skipped++))
+            continue
+        fi
+        
+        # Convert the file
+        echo "CONVERTING: $file → $output_file"
+        
+        if ffmpeg -i "$file" -acodec libopus -ac 1 -ab 32k -map_metadata 0 -id3v2_version 3 -write_id3v1 1 "$output_file" -loglevel error -stats; then
+            ((total_converted++))
+            echo "✓ Success: $output_file"
+        else
+            ((total_errors++))
+            echo "✗ Error converting: $file"
+        fi
+        echo ""
+    done
+done
+
+echo ""
+echo "=== SUMMARY ==="
+echo "Converted: $total_converted files"
+echo "Skipped: $total_skipped files (already existed)"
+echo "Errors: $total_errors files"
