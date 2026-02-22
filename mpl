@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# MPL PRO v2.9.0 - Media Playlist Player
+# MPL PRO v3.0.0 - Media Playlist Player
 # Play local audio/video files with playlist management
 # Press 'u' during playback to refresh the playlist without losing your position
 #
 # Usage:
-#   mpl              - open interactive menu in current directory
-#   mpl /path/to/dir - open interactive menu in specified directory
-#   mpl -a           - play all files in current directory
-#   mpl -a /path     - play all files in specified directory
+#   mpl                  - open interactive menu in current directory
+#   mpl /path/to/dir     - open interactive menu in specified directory
+#   mpl -a               - play all files in current directory
+#   mpl -a /path         - play all files in specified directory
+#   mpl course           - play files matching keyword (e.g. mpl course)
+#   mpl *course*         - same with explicit wildcards
+#   mpl course /path     - keyword filter in specified directory
 
 termux-wake-lock 2>/dev/null || true
 
@@ -25,12 +28,24 @@ trap "rm -f '$PLAYLIST_FILE'" EXIT
 # === ARGUMENT PARSING ===
 MODE="menu"
 DIR="."
+FILTER=""
 
 if [[ "$1" == "-a" || "$1" == "--all" ]]; then
     MODE="playlist"
     DIR="${2:-.}"
-elif [[ -n "$1" ]]; then
+elif [[ "$1" == *\** || "$1" == *\?* ]]; then
+    # Wildcard pattern like *course* - filter mode
+    MODE="filter"
+    FILTER="$1"
+    DIR="${2:-.}"
+elif [[ -n "$1" && -d "$1" ]]; then
+    # Existing directory - open menu there
     DIR="$1"
+elif [[ -n "$1" ]]; then
+    # Plain word - treat as keyword filter (e.g. mpl course)
+    MODE="filter"
+    FILTER="*$1*"
+    DIR="${2:-.}"
 fi
 
 FULL_DIR=$(realpath "$DIR" 2>/dev/null || echo "$DIR")
@@ -38,12 +53,27 @@ FULL_DIR=$(realpath "$DIR" 2>/dev/null || echo "$DIR")
 # === FUNCTIONS ===
 
 # Scan directory for supported media files
+# If FILTER is set, only include files matching the pattern (case-insensitive)
 _scan_files() {
-    mapfile -t files < <(find "$FULL_DIR" -maxdepth 1 -type f \( \
+    mapfile -t all_files < <(find "$FULL_DIR" -maxdepth 1 -type f \( \
         -iname "*.mp3" -o -iname "*.opus" -o -iname "*.ogg" -o \
         -iname "*.flac" -o -iname "*.m4a" -o -iname "*.wav" -o \
         -iname "*.mp4" -o -iname "*.webm" -o -iname "*.mkv" -o \
         -iname "*.part" \) 2>/dev/null | sort -f)
+
+    if [[ -n "$FILTER" ]]; then
+        # Convert wildcard pattern to case-insensitive grep pattern
+        local grep_pat=$(echo "$FILTER" | sed 's/\*/.*/g; s/?/./g')
+        files=()
+        for f in "${all_files[@]}"; do
+            local base=$(basename "$f")
+            if echo "$base" | grep -qi "$grep_pat"; then
+                files+=("$f")
+            fi
+        done
+    else
+        files=("${all_files[@]}")
+    fi
 
     ((${#files[@]} == 0)) && return 1
     return 0
@@ -89,7 +119,7 @@ EOF
 # Print player header with key bindings
 _show_header() {
     echo -e "${C}____________________________________________________________${R}"
-    echo -e "${C}  MPL PRO v2.9.0 | OFFLINE PLAYER                          ${R}"
+    echo -e "${C}  MPL PRO v3.0.0 | OFFLINE PLAYER                          ${R}"
     echo -e "${C}____________________________________________________________${R}"
     echo -e "${Y}  9 / 0  : Volume down / up              ${R}"
     echo -e "${Y}  , / .  : Seek -10 / +10 sec             ${R}"
@@ -206,11 +236,21 @@ if [[ "$MODE" == "playlist" ]]; then
     exit 0
 fi
 
+if [[ "$MODE" == "filter" ]]; then
+    echo -e "${C}🔍 Filter: ${Y}${FILTER}${C} — found ${G}${#files[@]}${C} files${R}"
+    sleep 0.5
+    # Drop into menu so user can browse the filtered list
+fi
+
 # === MAIN MENU ===
 while :; do
     clear
     echo -e "${C}============================================================${R}"
-    echo -e "${C}  FILE LIST: ${FULL_DIR}${R}"
+    if [[ -n "$FILTER" ]]; then
+        echo -e "${C}  FILE LIST: ${FULL_DIR} ${Y}[filter: ${FILTER}]${R}"
+    else
+        echo -e "${C}  FILE LIST: ${FULL_DIR}${R}"
+    fi
     echo -e "${C}============================================================${R}"
 
     for i in "${!files[@]}"; do
@@ -221,6 +261,7 @@ while :; do
 
     echo -e "${C}============================================================${R}"
     echo -e "${Y}  a = play all | s = shuffle | u = refresh | q = quit${R}"
+    echo -e "${Y}  / = search${R}"
     echo -n "  Choice: "
     read -r choice
 
@@ -252,6 +293,26 @@ while :; do
             if [[ -n "${files[$idx]}" ]]; then
                 _play_with_refresh "$idx"
                 _scan_files
+            fi
+            ;;
+        /*)
+            # / alone = prompt for keyword, /word = use directly
+            if [[ "$choice" == "/" ]]; then
+                echo -n "  Search: "
+                read -r keyword
+            else
+                keyword="${choice:1}"
+            fi
+            FILTER="*${keyword}*"
+            echo -e "${G}🔍 Filtering: ${FILTER}${R}"
+            if _scan_files; then
+                echo -e "${G}✅ Found ${#files[@]} matching files${R}"
+                sleep 0.5
+            else
+                echo -e "${Y}❌ No files matching: ${FILTER}${R}"
+                FILTER=""
+                _scan_files 2>/dev/null
+                sleep 1
             fi
             ;;
         *)
