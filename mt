@@ -111,6 +111,9 @@ _calc_duration() {
         local total_files=${#ALL_FILES[@]}
 
         for f in "${ALL_FILES[@]}"; do
+            # Skip incomplete .part files - ffprobe cannot read their duration
+            [[ "$f" == *.part ]] && { count=$((count + 1)); continue; }
+
             local dur
             dur=$(ffprobe -v quiet \
                 -show_entries format=duration \
