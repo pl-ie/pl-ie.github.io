@@ -298,6 +298,10 @@ _play_with_refresh() {
 
             echo -e "${G}Found ${#ALL_FILES[@]} files${R}"
 
+            # Restart duration calculation for updated file list
+            true > "$DURATION_CACHE"
+            _calc_duration
+
             # Find same file in updated ALL_FILES → restore index
             local new_idx=0
             for i in "${!ALL_FILES[@]}"; do
