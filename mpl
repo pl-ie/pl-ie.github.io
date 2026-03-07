@@ -59,7 +59,7 @@ _scan_files() {
         -iname "*.mp3" -o -iname "*.opus" -o -iname "*.ogg" -o \
         -iname "*.flac" -o -iname "*.m4a" -o -iname "*.wav" -o \
         -iname "*.mp4" -o -iname "*.webm" -o -iname "*.mkv" -o \
-        -iname "*.part" \) 2>/dev/null | sort -f)
+        -iname "*.part" \) 2>/dev/null | sort -V)
 
     if [[ -n "$FILTER" ]]; then
         # Convert wildcard pattern to case-insensitive grep pattern
