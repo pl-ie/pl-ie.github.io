@@ -8,6 +8,9 @@
 # Usage:
 #   mt               - open browser in current directory
 #   mt /path/to/dir  - open browser in specified directory
+#   mt kurs          - open browser with filter "kurs"
+#   mt *kurs*        - same with explicit wildcards
+#   mt kurs /path    - filter in specified directory
 #
 # Controls (browser):
 #   [number] + ENTER - play file by number
@@ -52,8 +55,12 @@ _create_input_conf() {
 SPACE cycle pause
 9 add volume -5
 0 add volume +5
-, seek -10
-. seek +10
+, seek -10 relative+keyframes
+. seek +10 relative+keyframes
+LEFT seek -20 relative+keyframes
+RIGHT seek +20 relative+keyframes
+UP seek +120 relative+keyframes
+DOWN seek -120 relative+keyframes
 n playlist-next
 b playlist-prev
 s cycle-values loop-playlist inf no
@@ -196,9 +203,9 @@ _draw_browser() {
 
     # Footer - show filter if active
     if [[ -n "$FILTER" ]]; then
-        echo -e "${Y}PgUp/PgDn${R} | ${Y}q: clear filter${R} | ${Y}/: search${R} | ${C}Filter: ${FILTER} (${#DISPLAY_FILES[@]} files)${R}"
+        echo -e "${Y}a: play all${R} | ${Y}u: refresh${R} | ${Y}q: clear filter${R} | ${Y}/: search${R} | ${C}Filter: ${FILTER} (${#DISPLAY_FILES[@]} files)${R}"
     else
-        echo -e "${Y}PgUp/PgDn${R} | ${Y}q: quit${R} | ${Y}/: search${R} | ${C}Total: ${dur_val}${R}"
+        echo -e "${Y}PgUp/PgDn${R} | ${Y}u: refresh${R} | ${Y}q: quit${R} | ${Y}/: search${R} | ${C}Total: ${dur_val}${R}"
     fi
     echo -ne "${Y}Page: $((CURRENT_PAGE + 1))/$total_pages${R} | ${G}Choice:${R} "
 }
@@ -211,6 +218,10 @@ _show_playback_header() {
     echo -e "${Y}  9 / 0  : Volume down / up${R}"
     echo -e ""
     echo -e "${Y}  , / .  : Seek -10 / +10 sec${R}"
+    echo -e ""
+    echo -e "${Y}  ← / →  : Seek -20 / +20 sec${R}"
+    echo -e ""
+    echo -e "${Y}  ↑ / ↓  : Seek +120 / -120 sec${R}"
     echo -e ""
     echo -e "${Y}  n / b  : Next / Previous${R}"
     echo -e ""
@@ -259,11 +270,15 @@ _run_mpv() {
     mpv \
         --no-video \
         --audio-display=no \
+        --no-input-default-bindings \
+        --input-ar-delay=1000 \
+        --input-ar-rate=1 \
+        --volume=60 \
         --playlist="$PLAYLIST_FILE" \
         --playlist-start="$start_idx" \
         --save-position-on-quit \
         --resume-playback \
-        --watch-later-directory="$WATCH_LATER_BASE/session" \
+        --watch-later-directory="$WATCH_LATER_BASE" \
         --watch-later-options-remove=pause \
         --input-conf="$INPUT_CONF" \
         --term-status-msg='[${playlist-pos-1}/${playlist-count}] ${time-pos}/${duration} | V:${volume}%' \
@@ -402,7 +417,21 @@ _handle_number() {
 # === STARTUP ===
 
 DIR="."
-[[ -n "$1" && -d "$1" ]] && DIR="$1"
+FILTER=""
+
+if [[ "$1" == *\** || "$1" == *\?* ]]; then
+    # Wildcard pattern like *kurs* - filter mode
+    FILTER="$1"
+    DIR="${2:-.}"
+elif [[ -n "$1" && -d "$1" ]]; then
+    # Existing directory path
+    DIR="$1"
+elif [[ -n "$1" ]]; then
+    # Plain keyword - treat as filter (e.g. mt kurs)
+    FILTER="*$1*"
+    DIR="${2:-.}"
+fi
+
 FULL_DIR=$(realpath "$DIR" 2>/dev/null || echo "$DIR")
 
 mapfile -t ALL_FILES < <(
@@ -421,6 +450,17 @@ fi
 
 DISPLAY_FILES=("${ALL_FILES[@]}")
 
+# Apply CLI filter if given (e.g. mt kurs)
+if [[ -n "$FILTER" ]]; then
+    _apply_filter
+    if (( ${#DISPLAY_FILES[@]} == 0 )); then
+        echo "No files matching: $FILTER"
+        exit 1
+    fi
+    echo -e "${C}Filter: ${Y}${FILTER}${C} — found ${G}${#DISPLAY_FILES[@]}${C} files${R}"
+    sleep 0.5
+fi
+
 # Create key bindings config once (reused for every mpv launch)
 _create_input_conf
 
@@ -436,17 +476,57 @@ while :; do
     read -s -r -n 1 key
 
     if [[ "$key" == $'\e' ]]; then
-        read -s -r -n 2 -t 0.05 rest
+        read -s -r -n 1 -t 0.05 esc1
+        read -s -r -n 1 -t 0.05 esc2
+        read -s -r -n 1 -t 0.05 esc3
+        rest="${esc1}${esc2}${esc3}"
 
-        if [[ "$rest" == "[5" ]]; then
+        if [[ "$rest" == "[5~" ]]; then
+            # PgUp
             (( CURRENT_PAGE > 0 )) && (( CURRENT_PAGE-- ))
             _draw_browser
-        elif [[ "$rest" == "[6" ]]; then
+        elif [[ "$rest" == "[6~" ]]; then
+            # PgDn
+            _page_down
+        elif [[ "${esc1}${esc2}" == "[A" ]]; then
+            # Arrow Up - scroll one page up
+            (( CURRENT_PAGE > 0 )) && (( CURRENT_PAGE-- ))
+            _draw_browser
+        elif [[ "${esc1}${esc2}" == "[B" ]]; then
+            # Arrow Down - scroll one page down
             _page_down
         fi
 
     elif [[ "$key" == "" ]]; then
         _draw_browser
+
+    elif [[ "$key" == "u" || "$key" == "U" ]]; then
+        # Refresh file list
+        mapfile -t ALL_FILES < <(
+            find "$FULL_DIR" -maxdepth 1 -type f \( \
+                -iname "*.mp3"  -o -iname "*.opus" -o -iname "*.ogg"  -o \
+                -iname "*.flac" -o -iname "*.m4a"  -o -iname "*.wav"  -o \
+                -iname "*.mp4"  -o -iname "*.webm" -o -iname "*.mkv"  -o \
+                -iname "*.part" \
+            \) 2>/dev/null | sort -V
+        )
+        _apply_filter
+        true > "$DURATION_CACHE"
+        _calc_duration
+        LAST_H=0
+        _draw_browser
+
+    elif [[ "$key" == "a" || "$key" == "A" ]]; then
+        # Play all - only available in Search/filter mode
+        if [[ -n "$FILTER" ]]; then
+            local first_file="${DISPLAY_FILES[0]}"
+            local play_idx=0
+            for j in "${!ALL_FILES[@]}"; do
+                [[ "${ALL_FILES[$j]}" == "$first_file" ]] && { play_idx=$j; break; }
+            done
+            _play_with_refresh "$play_idx"
+            _draw_browser
+        fi
 
     elif [[ "$key" =~ [0-9] ]]; then
         _handle_number "$key"

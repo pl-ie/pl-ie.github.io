@@ -104,8 +104,12 @@ _create_input_conf() {
 SPACE cycle pause
 9 add volume -5
 0 add volume +5
-, seek -10
-. seek +10
+, seek -10 relative+keyframes
+. seek +10 relative+keyframes
+LEFT seek -20 relative+keyframes
+RIGHT seek +20 relative+keyframes
+UP seek +120 relative+keyframes
+DOWN seek -120 relative+keyframes
 n playlist-next
 b playlist-prev
 s cycle-values loop-playlist inf no ; show-text "Loop: ${loop-playlist}"
@@ -122,7 +126,9 @@ _show_header() {
     echo -e "${C}  MPL PRO v3.0.0 | OFFLINE PLAYER                          ${R}"
     echo -e "${C}____________________________________________________________${R}"
     echo -e "${Y}  9 / 0  : Volume down / up              ${R}"
-    echo -e "${Y}  , / .  : Seek -10 / +10 sec             ${R}"
+    echo -e "${Y}  , / .  : Seek -10 / +10 sec            ${R}"
+    echo -e "${Y}  ← / →  : Seek -20 / +20 sec            ${R}"
+    echo -e "${Y}  ↑ / ↓  : Seek +120 / -120 sec          ${R}"
     echo -e "${Y}  n / b  : Next / Previous               ${R}"
     echo -e "${Y}  SPACE  : Pause | s: Shuffle            ${R}"
     echo -e "${Y}  r: Restart | q: Menu                   ${R}"
@@ -142,8 +148,7 @@ _run_mpv() {
     trap "rm -f '$input_conf'" RETURN
     _create_input_conf "$input_conf"
 
-    local watch_dir="$WATCH_LATER_BASE/playlist_session"
-    mkdir -p "$watch_dir"
+    local watch_dir="$WATCH_LATER_BASE"
 
     clear
     _show_header
@@ -151,6 +156,10 @@ _run_mpv() {
     mpv \
         --no-video \
         --audio-display=no \
+        --no-input-default-bindings \
+        --input-ar-delay=1000 \
+        --input-ar-rate=1 \
+        --volume=60 \
         --playlist="$PLAYLIST_FILE" \
         --playlist-start="$start_idx" \
         --save-position-on-quit \
@@ -261,11 +270,12 @@ while :; do
 
     echo -e "${C}============================================================${R}"
     echo -e "${Y}  a = play all | s = shuffle | u = refresh | q = quit${R}"
-    echo -e "${Y}  / = search${R}"
-    echo -n "  Choice: "
-    read -r choice
+    echo -e "${Y}  / = search | number + ENTER = play${R}"
+    echo -ne "  Choice: "
 
-    case "$choice" in
+    read -s -r -n 1 key
+
+    case "$key" in
         a|A)
             _play_with_refresh 0
             _scan_files
@@ -276,7 +286,7 @@ while :; do
             _scan_files
             ;;
         u|U)
-            echo -e "${G}🔄 Refreshing file list...${R}"
+            echo -e "\n${G}🔄 Refreshing file list...${R}"
             if _scan_files; then
                 echo -e "${G}✅ Found ${#files[@]} files${R}"
                 sleep 0.5
@@ -286,37 +296,42 @@ while :; do
             fi
             ;;
         q|Q)
-            clear; exit 0
-            ;;
-        [0-9]*)
-            idx=$((choice-1))
-            if [[ -n "${files[$idx]}" ]]; then
-                _play_with_refresh "$idx"
+            if [[ -n "$FILTER" ]]; then
+                FILTER=""
                 _scan_files
+            else
+                clear; exit 0
             fi
             ;;
-        /*)
-            # / alone = prompt for keyword, /word = use directly
-            if [[ "$choice" == "/" ]]; then
-                echo -n "  Search: "
-                read -r keyword
+        /)
+            echo -e "\r\033[K"
+            echo -ne "${G}Search: ${R}"
+            read -r keyword
+            if [[ -n "$keyword" ]]; then
+                FILTER="*${keyword}*"
+                if ! _scan_files; then
+                    echo -e "${Y}❌ No files matching: ${keyword}${R}"
+                    FILTER=""
+                    _scan_files 2>/dev/null
+                    sleep 1
+                fi
             else
-                keyword="${choice:1}"
-            fi
-            FILTER="*${keyword}*"
-            echo -e "${G}🔍 Filtering: ${FILTER}${R}"
-            if _scan_files; then
-                echo -e "${G}✅ Found ${#files[@]} matching files${R}"
-                sleep 0.5
-            else
-                echo -e "${Y}❌ No files matching: ${FILTER}${R}"
                 FILTER=""
                 _scan_files 2>/dev/null
-                sleep 1
             fi
             ;;
-        *)
-            sleep 0.5
+        [0-9])
+            echo -n "$key"
+            read -r rest
+            input_cmd="${key}${rest}"
+            input_cmd=$(echo "$input_cmd" | tr -cd '0-9')
+            if [[ -n "$input_cmd" ]]; then
+                idx=$((input_cmd - 1))
+                if [[ -n "${files[$idx]}" ]]; then
+                    _play_with_refresh "$idx"
+                    _scan_files
+                fi
+            fi
             ;;
     esac
 done
