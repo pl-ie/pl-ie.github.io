@@ -45,6 +45,8 @@ CURRENT_PAGE=0
 LAST_H=0
 LAST_W=0
 FILTER=""
+TIME_FILTER=0       # duration in minutes (0 = disabled)
+TIME_FILTER_MODE="" # + (>=) or - (<=)
 
 trap "rm -f '$DURATION_CACHE' '$INPUT_CONF'" EXIT
 
@@ -90,22 +92,47 @@ _wait_for_part() {
     fi
 }
 
-# Apply FILTER to ALL_FILES → update DISPLAY_FILES and reset page.
+# Apply FILTER and TIME_FILTER to ALL_FILES → update DISPLAY_FILES and reset page.
 _apply_filter() {
+    local tmp_files=()
+
+    # Step 1: apply text filter
     if [[ -z "$FILTER" ]]; then
-        DISPLAY_FILES=("${ALL_FILES[@]}")
+        tmp_files=("${ALL_FILES[@]}")
     else
         local grep_pat
         grep_pat=$(echo "$FILTER" | sed 's/\*/.*/g; s/?/./g')
-        DISPLAY_FILES=()
         for f in "${ALL_FILES[@]}"; do
             local base
             base=$(basename "$f")
             if echo "$base" | grep -qi "$grep_pat"; then
-                DISPLAY_FILES+=("$f")
+                tmp_files+=("$f")
             fi
         done
     fi
+
+    # Step 2: apply time filter if set
+    if (( TIME_FILTER > 0 )); then
+        local min_secs=$(( TIME_FILTER * 60 ))
+        DISPLAY_FILES=()
+        for f in "${tmp_files[@]}"; do
+            local dur
+            dur=$(ffprobe -v quiet \
+                -show_entries format=duration \
+                -of default=noprint_wrappers=1:nokey=1 \
+                "$f" 2>/dev/null)
+            if [[ "$dur" =~ ^[0-9] ]]; then
+                if [[ "$TIME_FILTER_MODE" == "+" ]]; then
+                    awk "BEGIN{exit !($dur >= $min_secs)}" && DISPLAY_FILES+=("$f")
+                else
+                    awk "BEGIN{exit !($dur <= $min_secs)}" && DISPLAY_FILES+=("$f")
+                fi
+            fi
+        done
+    else
+        DISPLAY_FILES=("${tmp_files[@]}")
+    fi
+
     CURRENT_PAGE=0
 }
 
@@ -202,10 +229,14 @@ _draw_browser() {
     done
 
     # Footer - show filter if active
-    if [[ -n "$FILTER" ]]; then
-        echo -e "${Y}a: play all${R} | ${Y}u: refresh${R} | ${Y}q: clear filter${R} | ${Y}/: search${R} | ${C}Filter: ${FILTER} (${#DISPLAY_FILES[@]} files)${R}"
+    local footer_info=""
+    [[ -n "$FILTER" ]] && footer_info=" | ${C}Filter: ${FILTER}${R}"
+    (( TIME_FILTER > 0 )) && footer_info+=" | ${C}Time: ${TIME_FILTER_MODE}${TIME_FILTER}min (${#DISPLAY_FILES[@]} files)${R}"
+
+    if [[ -n "$FILTER" || $TIME_FILTER -gt 0 ]]; then
+        echo -e "${Y}a: play all${R} | ${Y}u: refresh${R} | ${Y}t: time filter${R} | ${Y}q: clear filters${R} | ${Y}/: search${R}${footer_info}"
     else
-        echo -e "${Y}PgUp/PgDn${R} | ${Y}u: refresh${R} | ${Y}q: quit${R} | ${Y}/: search${R} | ${C}Total: ${dur_val}${R}"
+        echo -e "${Y}PgUp/PgDn${R} | ${Y}u: refresh${R} | ${Y}t: time filter${R} | ${Y}q: quit${R} | ${Y}/: search${R}\n${C}Total: ${dur_val}${R}"
     fi
     echo -ne "${Y}Page: $((CURRENT_PAGE + 1))/$total_pages${R} | ${G}Choice:${R} "
 }
@@ -534,16 +565,44 @@ while :; do
     elif [[ "$key" == "/" ]]; then
         _handle_search
 
+    elif [[ "$key" == "t" || "$key" == "T" ]]; then
+        # Time filter: +N = files >= N min, -N = files <= N min, 0 = off
+        echo -e "\r\033[K"
+        echo -ne "${G}Duration filter (+min or -min, 0=off): ${R}"
+        read -r tmin
+        tmin=$(echo "$tmin" | tr -d ' ')
+        if [[ "$tmin" == "0" ]]; then
+            TIME_FILTER=0
+            TIME_FILTER_MODE=""
+            _apply_filter
+        elif [[ "$tmin" =~ ^[+-][0-9]+$ ]]; then
+            TIME_FILTER=${tmin:1}   # number without sign
+            TIME_FILTER_MODE=${tmin:0:1}  # + or -
+            echo -e "${C}Scanning durations...${R}"
+            _apply_filter
+            if (( ${#DISPLAY_FILES[@]} == 0 )); then
+                echo -e "${Y}No files matching duration filter${R}"
+                TIME_FILTER=0
+                TIME_FILTER_MODE=""
+                _apply_filter
+                sleep 1
+            fi
+        fi
+        LAST_H=0
+        _draw_browser
+
     elif [[ "$key" == "q" || "$key" == "Q" ]]; then
-        if [[ -n "$FILTER" ]]; then
-            # First q: clear filter, show full list
+        if [[ -n "$FILTER" || $TIME_FILTER -gt 0 ]]; then
+            # Clear all filters
             FILTER=""
+            TIME_FILTER=0
+            TIME_FILTER_MODE=""
             DISPLAY_FILES=("${ALL_FILES[@]}")
             CURRENT_PAGE=0
             LAST_H=0
             _draw_browser
         else
-            # Second q (no filter): exit
+            # No filters active: exit
             clear
             exit 0
         fi
