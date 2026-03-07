@@ -296,12 +296,7 @@ while :; do
             fi
             ;;
         q|Q)
-            if [[ -n "$FILTER" ]]; then
-                FILTER=""
-                _scan_files
-            else
-                clear; exit 0
-            fi
+            clear; exit 0
             ;;
         /)
             echo -e "\r\033[K"

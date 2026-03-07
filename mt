@@ -382,9 +382,9 @@ _page_down() {
 # In full mode: number refers to real track number in ALL_FILES.
 _handle_number() {
     local first_key="$1"
-    echo -n "$first_key"
-    read -r rest
-    local input_cmd="${first_key}${rest}"
+    # Use -e for readline support (backspace works), pre-fill with first digit
+    echo -ne "\r\033[K"
+    read -e -r -p "$(echo -e "${G}Choice:${R} ")" -i "$first_key" input_cmd
     input_cmd=$(echo "$input_cmd" | tr -cd '0-9')
 
     if [[ -n "$input_cmd" ]]; then
