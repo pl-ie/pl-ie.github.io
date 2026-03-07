@@ -384,7 +384,7 @@ _handle_number() {
     local first_key="$1"
     # Use -e for readline support (backspace works), pre-fill with first digit
     echo -ne "\r\033[K"
-    read -e -r -p "$(echo -e "${G}Choice:${R} ")" -i "$first_key" input_cmd
+    read -e -r -p "$(echo -e "${G}Choice:${R} ")" input_cmd
     input_cmd=$(echo "$input_cmd" | tr -cd '0-9')
 
     if [[ -n "$input_cmd" ]]; then

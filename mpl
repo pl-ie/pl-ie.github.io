@@ -316,9 +316,8 @@ while :; do
             fi
             ;;
         [0-9])
-            echo -n "$key"
-            read -r rest
-            input_cmd="${key}${rest}"
+            echo -ne "\r\033[K"
+            read -e -r -p "$(echo -e "${G}Choice:${R} ")" input_cmd
             input_cmd=$(echo "$input_cmd" | tr -cd '0-9')
             if [[ -n "$input_cmd" ]]; then
                 idx=$((input_cmd - 1))
