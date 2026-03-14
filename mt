@@ -60,6 +60,7 @@ DOWN seek -120 relative+keyframes
 n playlist-next
 b playlist-prev
 s cycle-values loop-playlist inf no
+HOME seek 0 absolute
 u quit 42
 q quit 43
 ENTER playlist-next
@@ -233,6 +234,7 @@ _show_playback_header() {
     echo -e "\n${Y}  ↑ / ↓  : Seek +120 / -120 sec${R}"
     echo -e "\n${Y}  n / b  : Next / Previous${R}"
     echo -e "\n${Y}  SPACE  : Pause | s: Loop${R}"
+    echo -e "\n${Y}  HOME   : Restart from beginning${R}"
     echo -e "\n${Y}  u: Refresh playlist  |  q: Menu${R}"
     echo -e "\n${C}____________________________________________________________${R}"
 }
