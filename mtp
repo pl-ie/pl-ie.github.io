@@ -129,6 +129,7 @@ _run_mpv() {
     [[ "$file" == *.part ]] && keep_open="yes"
 
     mpv \
+        --volume=60 \
         --keep-open="$keep_open" \
         --no-input-default-bindings \
         --input-conf="$input_conf" \
@@ -213,15 +214,6 @@ while true; do
     _show_file_info "$CURRENT_FILE"
     _run_mpv "$CURRENT_FILE"
     EXIT_CODE=$?
-
-    # Auto-detect: did .part finish downloading while we were playing?
-    if [[ "$CURRENT_FILE" == *.part ]]; then
-        BASE=$(_find_base_file "$CURRENT_FILE")
-        if [[ -n "$BASE" ]]; then
-            echo -e "${G}✨ Download complete: $(basename "$BASE")${R}"
-            CURRENT_FILE="$BASE"
-        fi
-    fi
 
     if [[ $EXIT_CODE -eq 42 ]]; then
         # u pressed - refresh
