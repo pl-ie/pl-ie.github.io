@@ -1,177 +1,278 @@
-#!/usr/bin/env bash
-# mtp (media tail parts) - play .part files while they are still downloading
-#
-# Usage:
-#   mtp              - auto-detect newest .part or media file in current directory
-#   mtp <file>       - play a specific file
+#!/bin/bash
+# MTP v1.2 - Media Tail Player
+# Play .part files while downloading, recording or generating TTS
+# r = refresh (resume with more buffer)
+# q = quit (saves position)
 
-# === COLORS ===
 G='\033[1;32m'
 Y='\033[1;33m'
 C='\033[1;36m'
 M='\033[1;35m'
 R='\033[0m'
 
-# === FILE SELECTION ===
-if [ -n "$1" ]; then
-    PART_FILE="$1"
-    if [ ! -f "$PART_FILE" ]; then
-        echo -e "${Y}❌ File not found: $PART_FILE${R}"
-        exit 1
-    fi
-    echo -e "${C}📂 Using file from argument${R}"
-else
-    PART_FILE=$(ls -t *.part 2>/dev/null | head -1)
-    if [ -z "$PART_FILE" ]; then
-        PART_FILE=$(ls -t *.{mp4,mkv,webm,avi,mp3,opus,ogg,m4a,flac,wav} 2>/dev/null | head -1)
-    fi
-    if [ -z "$PART_FILE" ]; then
-        echo -e "${Y}❌ No media files found in current directory${R}"
-        exit 1
-    fi
-    echo -e "${C}📂 Auto-selected newest file${R}"
-fi
-
-# === WATCH LATER SETUP ===
 WATCH_LATER_BASE="$HOME/.config/mpv/watch_later"
 mkdir -p "$WATCH_LATER_BASE"
 
-if [[ "$PART_FILE" == *.part ]]; then
-    SESSION_DIR="$WATCH_LATER_BASE/downloading"
-    echo -e "${Y}📥 Mode: Downloading (.part file)${R}"
-    echo -e "${C}   Position saved temporarily (may shift as file grows)${R}"
-else
-    MTIME=$(stat -f%m "$PART_FILE" 2>/dev/null || stat -c%Y "$PART_FILE" 2>/dev/null)
-    PART_FILE_SAFE=$(echo "$PART_FILE" | tr '/' '_' | tr ' ' '_')
-    UNIQUE_SESSION="${PART_FILE_SAFE}_${MTIME}"
-    SESSION_DIR="$WATCH_LATER_BASE/completed/$UNIQUE_SESSION"
-    echo -e "${G}✅ Mode: Completed file${R}"
-fi
+# === FUNCTIONS ===
 
-mkdir -p "$SESSION_DIR"
+_session_dir() {
+    local file="$1"
+    # Strip .part suffix so .part and its final file share the same session dir
+    local base="${file%.part}"
+    local stem="${base%.*}"
+    local safe
+    safe=$(echo "$stem" | tr '/' '_' | tr ' ' '_')
+    echo "$WATCH_LATER_BASE/sessions/${safe}"
+}
 
-# Permanent input config saved in session dir
-INPUT_CONF="$SESSION_DIR/input.conf"
-cat > "$INPUT_CONF" <<'EOF'
+_wait_for_min_size() {
+    local file="$1"
+    [[ "$file" != *.part ]] && return 0
+
+    local size
+    size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
+    if (( size < 1048576 )); then
+        echo -e "${Y}⏳ Waiting for minimum size: 1 MB${R}"
+        while (( size < 1048576 )); do
+            sleep 1
+            size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
+            local size_mb
+            size_mb=$(echo "scale=2; $size / 1048576" | bc)
+            echo -ne "\r${M}📊 Size: ${size_mb} MB  ${R}"
+        done
+        local size_mb
+        size_mb=$(echo "scale=2; $size / 1048576" | bc)
+        echo -e "\n${G}✅ Minimum size reached: ${size_mb} MB${R}"
+    fi
+}
+
+_create_input_conf() {
+    local conf="$1"
+    cat > "$conf" <<'EOF'
 SPACE cycle pause
 9 add volume -5
 0 add volume +5
-, seek -10
-. seek +10
+, seek -10 relative+keyframes
+. seek +10 relative+keyframes
+LEFT seek -20 relative+keyframes
+RIGHT seek +20 relative+keyframes
+UP seek +120 relative+keyframes
+DOWN seek -120 relative+keyframes
+HOME seek 0 absolute
+r seek 0 absolute
+o show-text "Buffer: ${demuxer-cache-duration}s | ${demuxer-cache-time}s cached" 5000
+e quit 3
 u quit 42
-q quit
+q quit 4
 EOF
+}
 
-# === SHOW SAVED POSITION ===
-_show_saved_pos() {
-    local wl_file=$(find "$SESSION_DIR" -maxdepth 1 -type f ! -name "input.conf" 2>/dev/null | head -1)
-    if [ -n "$wl_file" ]; then
-        local saved_pos=$(grep "^start=" "$wl_file" 2>/dev/null | cut -d'=' -f2 | cut -d'.' -f1)
-        if [ -n "$saved_pos" ]; then
-            local saved_min=$((saved_pos / 60))
-            local saved_sec=$((saved_pos % 60))
-            echo -e "${G}💾 Resuming from:${R} ${saved_min}m ${saved_sec}s"
+_show_file_info() {
+    local file="$1"
+    local size_mb
+    size_mb=$(echo "scale=2; $(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null) / 1048576" | bc)
+    local session_dir
+    session_dir=$(_session_dir "$file")
+
+    echo -e "${C}____________________________________________________________${R}"
+    echo -e "${C}  MTP v1.2 | MEDIA TAIL PLAYER                            ${R}"
+    echo -e "${C}____________________________________________________________${R}"
+    echo -e "${Y}  9 / 0    : Volume down / up                ${R}"
+    echo -e "${Y}  , / .    : Seek -10 / +10 sec              ${R}"
+    echo -e "${Y}  ← / →    : Seek -20 / +20 sec              ${R}"
+    echo -e "${Y}  ↑ / ↓    : Seek +120 / -120 sec            ${R}"
+    echo -e "${Y}  SPACE    : Pause / Resume                  ${R}"
+    echo -e "${Y}  r / HOME : Restart file          ${R}"
+    echo -e "${Y}  o        : OSD cache info                   ${R}"
+    echo -e "${Y}  e        : EOF menu (resume/restart)     ${R}"
+    echo -e "${Y}  u        : Refresh (more buffer)           ${R}"
+    echo -e "${Y}  q        : Quit (saves position)           ${R}"
+    echo -e "${C}____________________________________________________________${R}"
+    if [[ "$file" == *.part ]]; then
+        echo -e "${Y}📥 Downloading (.part)${R}"
+    else
+        echo -e "${G}✅ Ready${R}"
+    fi
+    echo -e "${G}🎵 File:${R} $(basename "$file")"
+    echo -e "${M}📊 Size:${R} ${size_mb} MB"
+
+    local saved_file
+    saved_file=$(find "$session_dir" -type f 2>/dev/null | head -1)
+    if [[ -n "$saved_file" ]]; then
+        local pos
+        pos=$(grep "^start=" "$saved_file" 2>/dev/null | cut -d'=' -f2)
+        if [[ -n "$pos" ]]; then
+            local min sec
+            min=$(echo "scale=0; $pos / 60" | bc 2>/dev/null || echo "0")
+            sec=$(printf "%.0f" "$(echo "$pos % 60" | bc 2>/dev/null)" 2>/dev/null || echo "0")
+            echo -e "${G}💾 Resuming from:${R} ${min}m ${sec}s"
         fi
     fi
+    echo -e "${C}____________________________________________________________${R}"
 }
 
-# === BUFFER WAIT ===
-_wait_buffer() {
-    local size=$(stat -f%z "$PART_FILE" 2>/dev/null || stat -c%s "$PART_FILE" 2>/dev/null)
-    local size_mb=$(echo "scale=2; $size / 1048576" | bc)
+_run_mpv() {
+    local file="$1"
+    local session_dir
+    session_dir=$(_session_dir "$file")
+    mkdir -p "$session_dir"
 
-    if [[ "$PART_FILE" == *.part ]]; then
-        echo -e "${Y}⏳ Waiting for minimum buffer: 1 MB${R}"
-        while [ "$size" -lt 1048576 ]; do
-            sleep 1
-            size=$(stat -f%z "$PART_FILE" 2>/dev/null || stat -c%s "$PART_FILE" 2>/dev/null)
-            size_mb=$(echo "scale=2; $size / 1048576" | bc)
-            echo -ne "\r${M}📊 Size:${R} ${size_mb} MB  "
-        done
-        echo -e "\n${G}✅ Minimum buffer reached: ${size_mb} MB${R}"
+    local input_conf
+    input_conf=$(mktemp)
+    trap "rm -f '$input_conf'" RETURN
+    _create_input_conf "$input_conf"
+
+    local size_at_start
+    size_at_start=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
+
+    local keep_open="no"
+    [[ "$file" == *.part ]] && keep_open="yes"
+
+    mpv \
+        --keep-open="$keep_open" \
+        --no-input-default-bindings \
+        --input-conf="$input_conf" \
+        --demuxer-lavf-o=fflags=+nobuffer+fastseek \
+        --demuxer-readahead-secs=1 \
+        --cache=yes \
+        --cache-secs=10 \
+        --demuxer-max-bytes=50M \
+        --demuxer-max-back-bytes=20M \
+        --stream-buffer-size=2M \
+        --hr-seek=yes \
+        --hr-seek-demuxer-offset=0 \
+        --save-position-on-quit \
+        --resume-playback \
+        --watch-later-directory="$session_dir" \
+        --title="MTP: $(basename "$file")" \
+        "$file"
+
+    local exit_code=$?
+
+    local size_after size_at_start_mb size_after_mb
+    size_after=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo "$size_at_start")
+    size_at_start_mb=$(echo "scale=2; $size_at_start / 1048576" | bc)
+    size_after_mb=$(echo "scale=2; $size_after / 1048576" | bc)
+    local size_diff=$(( size_after - size_at_start ))
+
+    echo ""
+    echo -e "${C}____________________________________________________________${R}"
+    echo -e "${M}📊 Size at start:${R} ${size_at_start_mb} MB"
+    echo -e "${M}📊 Size at end:${R}   ${size_after_mb} MB"
+    if (( size_diff > 0 )); then
+        local size_diff_mb
+        size_diff_mb=$(echo "scale=2; $size_diff / 1048576" | bc)
+        echo -e "${G}📈 Downloaded during playback:${R} +${size_diff_mb} MB"
     fi
+    echo -e "${C}____________________________________________________________${R}"
+
+    return $exit_code
 }
 
-# === SHOW HEADER ===
-_show_header() {
-    local size=$(stat -f%z "$PART_FILE" 2>/dev/null || stat -c%s "$PART_FILE" 2>/dev/null)
-    local size_mb=$(echo "scale=2; $size / 1048576" | bc)
+_find_base_file() {
+    local part_file="$1"
+    local base="${part_file%.part}"
 
-    clear
-    echo -e "${C}____________________________________________________________${R}"
-    echo -e "${C}  MTP v1.1 | MEDIA TAIL PLAYER                             ${R}"
-    echo -e "${C}____________________________________________________________${R}"
-    echo -e "${Y}  9 / 0  : Volume down / up                             ${R}"
-    echo -e "${Y}  , / .  : Seek -10 / +10 sec                       ${R}"
-    echo -e "${Y}  SPACE  : Pause / Resume                               ${R}"
-    echo -e "${Y}  u      : Refresh (keeps pos)                     ${R}"
-    echo -e "${Y}  q      : Quit                                         ${R}"
-    echo -e "${C}____________________________________________________________${R}"
-    echo -e "${G}🎵 File:${R} $(basename "$PART_FILE")"
-    echo -e "${M}📊 Size:${R} ${size_mb} MB"
-    _show_saved_pos
-    echo -e "${C}____________________________________________________________${R}"
+    if [[ -f "$base" ]]; then
+        echo "$base"
+        return 0
+    fi
+
+    local stem="${base%.*}"
+    local found
+    found=$(ls -t "${stem}".mp4 "${stem}".mkv "${stem}".webm \
+               "${stem}".m4a "${stem}".mp3 "${stem}".opus \
+               "${stem}".ogg "${stem}".flac "${stem}".wav 2>/dev/null | head -1)
+    echo "$found"
 }
 
-# === MAIN PLAYBACK LOOP ===
-_play_loop() {
-    local size_session_start=$(stat -f%z "$PART_FILE" 2>/dev/null || stat -c%s "$PART_FILE" 2>/dev/null)
+# === FILE SELECTION ===
+if [[ -n "$1" ]]; then
+    CURRENT_FILE="$1"
+    if [[ ! -f "$CURRENT_FILE" ]]; then
+        echo -e "${Y}❌ File not found: $CURRENT_FILE${R}"
+        exit 1
+    fi
+    echo -e "${C}📂 File selected from argument${R}"
+else
+    CURRENT_FILE=$(ls -t *.part 2>/dev/null | head -1)
+    if [[ -z "$CURRENT_FILE" ]]; then
+        CURRENT_FILE=$(ls -t *.mp4 *.mkv *.webm *.avi *.mp3 *.opus \
+                          *.ogg *.m4a *.flac *.wav 2>/dev/null | head -1)
+    fi
+    if [[ -z "$CURRENT_FILE" ]]; then
+        echo -e "${Y}❌ No media files found${R}"
+        exit 1
+    fi
+    echo -e "${C}📂 Auto-selected latest file${R}"
+fi
 
-    while true; do
-        _show_header
+# === MAIN LOOP ===
+while true; do
+    _wait_for_min_size "$CURRENT_FILE"
+    _show_file_info "$CURRENT_FILE"
+    _run_mpv "$CURRENT_FILE"
+    EXIT_CODE=$?
 
-        mpv \
-            --demuxer-lavf-o=fflags=+nobuffer+fastseek \
-            --demuxer-readahead-secs=1 \
-            --cache=yes \
-            --cache-secs=10 \
-            --demuxer-max-bytes=50M \
-            --demuxer-max-back-bytes=20M \
-            --stream-buffer-size=2M \
-            --hr-seek=yes \
-            --hr-seek-demuxer-offset=0 \
-            --save-position-on-quit \
-            --resume-playback \
-            --watch-later-directory="$SESSION_DIR" \
-            --input-conf="$INPUT_CONF" \
-            --title="mtp: $(basename "$PART_FILE")" \
-            "$PART_FILE"
+    # Auto-detect: did .part finish downloading while we were playing?
+    if [[ "$CURRENT_FILE" == *.part ]]; then
+        BASE=$(_find_base_file "$CURRENT_FILE")
+        if [[ -n "$BASE" ]]; then
+            echo -e "${G}✨ Download complete: $(basename "$BASE")${R}"
+            CURRENT_FILE="$BASE"
+        fi
+    fi
 
-        local exit_code=$?
+    if [[ $EXIT_CODE -eq 42 ]]; then
+        # u pressed - refresh
+        echo -e "${G}🔄 Refreshing...${R}"
+        if [[ "$CURRENT_FILE" == *.part ]]; then
+            local_size=$(stat -c%s "$CURRENT_FILE" 2>/dev/null || stat -f%z "$CURRENT_FILE" 2>/dev/null)
+            local_mb=$(echo "scale=2; $local_size / 1048576" | bc)
+            echo -e "${M}📊 Current .part size: ${local_mb} MB${R}"
+        else
+            echo -e "${G}✅ Resuming from saved position...${R}"
+        fi
+        sleep 1
+        continue
 
-        if [ $exit_code -eq 42 ]; then
-            local size_new=$(stat -f%z "$PART_FILE" 2>/dev/null || stat -c%s "$PART_FILE" 2>/dev/null)
-            local size_new_mb=$(echo "scale=2; $size_new / 1048576" | bc)
-            local size_before=$(stat -f%z "$PART_FILE" 2>/dev/null || stat -c%s "$PART_FILE" 2>/dev/null)
-            local gained=$(echo "scale=2; ($size_new - $size_before) / 1048576" | bc)
-            echo -e "\n${G}🔄 Refreshed — size: ${size_new_mb} MB${R}"
-            echo -e "${C}   Resuming from saved position...${R}"
+    elif [[ $EXIT_CODE -eq 4 ]]; then
+        # q pressed - exit immediately
+        break
+
+    elif [[ $EXIT_CODE -eq 3 || $EXIT_CODE -eq 0 ]]; then
+        # e pressed or natural EOF - show menu
+        echo -e "${G}✅ Playback paused at end of buffer (EOF)${R}"
+        echo -e "${C}____________________________________________________________${R}"
+        echo -e "${Y}  u / SPACE : Check for more data & Resume${R}"
+        echo -e "${Y}  r / HOME  : Restart file${R}"
+        echo -e "${Y}  q / Enter : Quit${R}"
+        echo -e "${C}____________________________________________________________${R}"
+
+        read -r -s -n 1 choice
+        if [[ "$choice" == "u" || "$choice" == "U" || "$choice" == " " ]]; then
+            # Check if .part became a completed file before resuming
+            if [[ "$CURRENT_FILE" == *.part ]]; then
+                BASE=$(_find_base_file "$CURRENT_FILE")
+                if [[ -n "$BASE" ]]; then
+                    echo -e "${G}✨ Switch to completed file: $(basename "$BASE")${R}"
+                    CURRENT_FILE="$BASE"
+                fi
+            fi
+            echo -e "${G}🔄 Resuming from last saved position...${R}"
+            sleep 1
+            continue
+        elif [[ "$choice" == "r" || "$choice" == "R" ]]; then
+            session=$(_session_dir "$CURRENT_FILE")
+            find "$session" -type f -delete 2>/dev/null
+            echo -e "${G}⏮  Restarting file...${R}"
             sleep 1
             continue
         else
-            echo ""
-            if [ $exit_code -eq 0 ]; then
-                echo -e "${G}✅ Playback finished${R}"
-            else
-                echo -e "${Y}⚠️  Interrupted (code: $exit_code)${R}"
-            fi
             break
         fi
-    done
 
-    # Final summary
-    local size_end=$(stat -f%z "$PART_FILE" 2>/dev/null || stat -c%s "$PART_FILE" 2>/dev/null)
-    local size_end_mb=$(echo "scale=2; $size_end / 1048576" | bc)
-    local total_diff_mb=$(echo "scale=2; ($size_end - $size_session_start) / 1048576" | bc)
-
-    echo -e "${C}____________________________________________________________${R}"
-    echo -e "${M}📊 Size at end:${R} ${size_end_mb} MB"
-    if [ "$total_diff_mb" != "0.00" ]; then
-        echo -e "${G}📈 Downloaded during session:${R} +${total_diff_mb} MB"
+    else
+        break
     fi
-    echo -e "${C}____________________________________________________________${R}"
-}
-
-# === RUN ===
-_wait_buffer
-_play_loop
+done
