@@ -17,11 +17,15 @@ mkdir -p "$WATCH_LATER_BASE"
 
 _session_dir() {
     local file="$1"
-    # Strip .part suffix so .part and its final file share the same session dir
-    local base="${file%.part}"
+    # Use only basename so files in different dirs share the same session
+    # e.g. party/file.m4a.part and oh/file.m4a -> same session dir
+    # Remove '/' completely to avoid creating unintended subdirectories
+    # e.g. "80/20 Principle" -> "8020_Principle" not "80/20_Principle"
+    local base
+    base=$(basename "${file%.part}")
     local stem="${base%.*}"
     local safe
-    safe=$(echo "$stem" | tr '/' '_' | tr ' ' '_')
+    safe=$(echo "$stem" | tr -d '/' | tr ' ' '_')
     echo "$WATCH_LATER_BASE/sessions/${safe}"
 }
 
@@ -82,9 +86,9 @@ _show_file_info() {
     echo -e "${Y}  ← / →    : Seek -20 / +20 sec              ${R}"
     echo -e "${Y}  ↑ / ↓    : Seek +120 / -120 sec            ${R}"
     echo -e "${Y}  SPACE    : Pause / Resume                  ${R}"
-    echo -e "${Y}  r / HOME : Restart file          ${R}"
-    echo -e "${Y}  o        : OSD cache info                   ${R}"
-    echo -e "${Y}  e        : EOF menu (resume/restart)     ${R}"
+    echo -e "${Y}  r / HOME : Restart file                    ${R}"
+    echo -e "${Y}  o        : OSD cache info                  ${R}"
+    echo -e "${Y}  e        : EOF menu                        ${R}"
     echo -e "${Y}  u        : Refresh (more buffer)           ${R}"
     echo -e "${Y}  q        : Quit (saves position)           ${R}"
     echo -e "${C}____________________________________________________________${R}"
@@ -96,19 +100,35 @@ _show_file_info() {
     echo -e "${G}🎵 File:${R} $(basename "$file")"
     echo -e "${M}📊 Size:${R} ${size_mb} MB"
 
-    local saved_file
-    saved_file=$(find "$session_dir" -type f 2>/dev/null | head -1)
-    if [[ -n "$saved_file" ]]; then
-        local pos
-        pos=$(grep "^start=" "$saved_file" 2>/dev/null | cut -d'=' -f2)
-        if [[ -n "$pos" ]]; then
-            local min sec
-            min=$(echo "scale=0; $pos / 60" | bc 2>/dev/null || echo "0")
-            sec=$(printf "%.0f" "$(echo "$pos % 60" | bc 2>/dev/null)" 2>/dev/null || echo "0")
-            echo -e "${G}💾 Resuming from:${R} ${min}m ${sec}s"
-        fi
+    local saved_pos
+    saved_pos=$(_get_saved_pos "$session_dir")
+    if [[ -n "$saved_pos" ]]; then
+        local min sec
+        min=$(echo "scale=0; $saved_pos / 60" | bc 2>/dev/null || echo "0")
+        sec=$(printf "%.0f" "$(echo "$saved_pos % 60" | bc 2>/dev/null)" 2>/dev/null || echo "0")
+        echo -e "${G}💾 Resuming from:${R} ${min}m ${sec}s"
     fi
     echo -e "${C}____________________________________________________________${R}"
+}
+
+_get_saved_pos() {
+    local session_dir="$1"
+    local pos_file="$session_dir/position.txt"
+    if [[ -f "$pos_file" ]]; then
+        cat "$pos_file"
+    fi
+}
+
+_save_pos_from_session() {
+    # Read start= from any mpv watch_later file in session_dir and save to position.txt
+    local session_dir="$1"
+    local pos_file="$session_dir/position.txt"
+    local saved
+    saved=$(find "$session_dir" -type f ! -name "position.txt" 2>/dev/null \
+            | xargs grep -h "^start=" 2>/dev/null | tail -1 | cut -d'=' -f2)
+    if [[ -n "$saved" ]]; then
+        echo "$saved" > "$pos_file"
+    fi
 }
 
 _run_mpv() {
@@ -128,8 +148,16 @@ _run_mpv() {
     local keep_open="no"
     [[ "$file" == *.part ]] && keep_open="yes"
 
+    # Read saved position from our own position.txt (works across .part -> .m4a switch)
+    local start_param=""
+    local saved_pos
+    saved_pos=$(_get_saved_pos "$session_dir")
+    if [[ -n "$saved_pos" ]]; then
+        start_param="--start=${saved_pos}"
+    fi
+
     mpv \
-        --volume=60 \
+        --volume=70 \
         --keep-open="$keep_open" \
         --no-input-default-bindings \
         --input-conf="$input_conf" \
@@ -143,12 +171,16 @@ _run_mpv() {
         --hr-seek=yes \
         --hr-seek-demuxer-offset=0 \
         --save-position-on-quit \
-        --resume-playback \
         --watch-later-directory="$session_dir" \
         --title="MTP: $(basename "$file")" \
+        $start_param \
         "$file"
 
     local exit_code=$?
+
+    # After mpv exits, read its watch_later file and save position to our position.txt
+    # This works regardless of which hash mpv used internally
+    _save_pos_from_session "$session_dir"
 
     local size_after size_at_start_mb size_after_mb
     size_after=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo "$size_at_start")
@@ -187,6 +219,21 @@ _find_base_file() {
     echo "$found"
 }
 
+# Auto-switch from .part to completed file if download finished
+_check_and_switch() {
+    local file="$1"
+    [[ "$file" != *.part ]] && echo "$file" && return 0
+
+    local base
+    base=$(_find_base_file "$file")
+    if [[ -n "$base" ]]; then
+        echo -e "${G}✨ Download complete — switching to: $(basename "$base")${R}" >&2
+        echo "$base"
+    else
+        echo "$file"
+    fi
+}
+
 # === FILE SELECTION ===
 if [[ -n "$1" ]]; then
     CURRENT_FILE="$1"
@@ -218,6 +265,7 @@ while true; do
     if [[ $EXIT_CODE -eq 42 ]]; then
         # u pressed - refresh
         echo -e "${G}🔄 Refreshing...${R}"
+        CURRENT_FILE=$(_check_and_switch "$CURRENT_FILE")
         if [[ "$CURRENT_FILE" == *.part ]]; then
             local_size=$(stat -c%s "$CURRENT_FILE" 2>/dev/null || stat -f%z "$CURRENT_FILE" 2>/dev/null)
             local_mb=$(echo "scale=2; $local_size / 1048576" | bc)
@@ -233,7 +281,9 @@ while true; do
         break
 
     elif [[ $EXIT_CODE -eq 3 || $EXIT_CODE -eq 0 ]]; then
-        # e pressed or natural EOF - show menu
+        # e pressed or natural EOF - check for completed file first
+        CURRENT_FILE=$(_check_and_switch "$CURRENT_FILE")
+
         echo -e "${G}✅ Playback paused at end of buffer (EOF)${R}"
         echo -e "${C}____________________________________________________________${R}"
         echo -e "${Y}  u / SPACE : Check for more data & Resume${R}"
@@ -242,19 +292,16 @@ while true; do
         echo -e "${C}____________________________________________________________${R}"
 
         read -r -s -n 1 choice
+        # Handle escape sequences (arrow keys, HOME, etc.)
+        if [[ "$choice" == $'\033' ]]; then
+            read -r -s -n 2 -t 0.1 seq
+            choice="${choice}${seq}"
+        fi
         if [[ "$choice" == "u" || "$choice" == "U" || "$choice" == " " ]]; then
-            # Check if .part became a completed file before resuming
-            if [[ "$CURRENT_FILE" == *.part ]]; then
-                BASE=$(_find_base_file "$CURRENT_FILE")
-                if [[ -n "$BASE" ]]; then
-                    echo -e "${G}✨ Switch to completed file: $(basename "$BASE")${R}"
-                    CURRENT_FILE="$BASE"
-                fi
-            fi
             echo -e "${G}🔄 Resuming from last saved position...${R}"
             sleep 1
             continue
-        elif [[ "$choice" == "r" || "$choice" == "R" ]]; then
+        elif [[ "$choice" == "r" || "$choice" == "R" || "$choice" == $'\033[H' || "$choice" == $'\033OH' ]]; then
             session=$(_session_dir "$CURRENT_FILE")
             find "$session" -type f -delete 2>/dev/null
             echo -e "${G}⏮  Restarting file...${R}"
