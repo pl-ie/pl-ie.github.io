@@ -333,12 +333,10 @@ while :; do
     case "$key" in
         a|A)
             _play_with_refresh 0
-            _scan_files
             ;;
         s|S)
             mapfile -t files < <(printf "%s\n" "${files[@]}" | shuf)
             _play_with_refresh 0
-            _scan_files
             ;;
         u|U)
             echo -e "\n${G}🔄 Refreshing file list...${R}"
@@ -381,7 +379,6 @@ while :; do
                 idx=$((input_cmd - 1))
                 if [[ -n "${files[$idx]}" ]]; then
                     _play_with_refresh "$idx"
-                    _scan_files
                 fi
             fi
             ;;
