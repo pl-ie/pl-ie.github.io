@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MPL PRO v3.0.0 - Media Playlist Player
+# MPL PRO v3.1.0 - Media Playlist Player
 # Play local audio/video files with playlist management
 # Press 'u' during playback to refresh the playlist without losing your position
 #
@@ -24,28 +24,29 @@ _MR=$'\033[0m'
 WATCH_LATER_BASE="$HOME/.config/mpv/watch_later"
 mkdir -p "$WATCH_LATER_BASE"
 
-# Global playlist file - shared between functions
 PLAYLIST_FILE=$(mktemp)
 trap "rm -f '$PLAYLIST_FILE'" EXIT
 
-# === ARGUMENT PARSING ===
+# === STATE ===
 MODE="menu"
 DIR="."
 FILTER=""
+TIME_FILTER=0
+TIME_FILTER_MODE=""
+ALL_FILES=()
+files=()
 
+# === ARGUMENT PARSING ===
 if [[ "$1" == "-a" || "$1" == "--all" ]]; then
     MODE="playlist"
     DIR="${2:-.}"
 elif [[ "$1" == *\** || "$1" == *\?* ]]; then
-    # Wildcard pattern like *course* - filter mode
     MODE="filter"
     FILTER="$1"
     DIR="${2:-.}"
 elif [[ -n "$1" && -d "$1" ]]; then
-    # Existing directory - open menu there
     DIR="$1"
 elif [[ -n "$1" ]]; then
-    # Plain word - treat as keyword filter (e.g. mpl course)
     MODE="filter"
     FILTER="*$1*"
     DIR="${2:-.}"
@@ -55,31 +56,68 @@ FULL_DIR=$(realpath "$DIR" 2>/dev/null || echo "$DIR")
 
 # === FUNCTIONS ===
 
-# Scan directory for supported media files
-# If FILTER is set, only include files matching the pattern (case-insensitive)
-_scan_files() {
-    mapfile -t all_files < <(find "$FULL_DIR" -maxdepth 1 -type f \( \
+# Raw scan → ALL_FILES
+_rescan_files() {
+    mapfile -t ALL_FILES < <(find "$FULL_DIR" -maxdepth 1 -type f \( \
         -iname "*.mp3" -o -iname "*.opus" -o -iname "*.ogg" -o \
         -iname "*.flac" -o -iname "*.m4a" -o -iname "*.wav" -o \
         -iname "*.mp4" -o -iname "*.webm" -o -iname "*.mkv" -o \
         -iname "*.part" \) 2>/dev/null | sort -V)
+}
 
-    if [[ -n "$FILTER" ]]; then
-        # Convert wildcard pattern to case-insensitive grep pattern
-        local grep_pat=$(echo "$FILTER" | sed 's/\*/.*/g; s/?/./g')
+# Apply text filter + time filter → files[]
+_apply_filter() {
+    local tmp=()
+
+    if [[ -z "$FILTER" ]]; then
+        tmp=("${ALL_FILES[@]}")
+    else
+        local grep_pat
+        grep_pat=$(echo "$FILTER" | sed 's/\*/.*/g; s/?/./g')
+        for f in "${ALL_FILES[@]}"; do
+            local base
+            base=$(basename "$f")
+            echo "$base" | grep -qi "$grep_pat" && tmp+=("$f")
+        done
+    fi
+
+    if (( TIME_FILTER > 0 )); then
+        local min_secs=$(( TIME_FILTER * 60 ))
         files=()
-        for f in "${all_files[@]}"; do
-            local base=$(basename "$f")
-            if echo "$base" | grep -qi "$grep_pat"; then
-                files+=("$f")
+        local count=0 total=${#tmp[@]}
+        for f in "${tmp[@]}"; do
+            count=$((count+1))
+            printf "\r${C}Scanning: %d/%d  found: %d${R}" "$count" "$total" "${#files[@]}"
+            local dur
+            dur=$(ffprobe -v quiet \
+                -show_entries format=duration \
+                -of default=noprint_wrappers=1:nokey=1 \
+                "$f" 2>/dev/null)
+            if [[ "$dur" =~ ^[0-9] ]]; then
+                if [[ "$TIME_FILTER_MODE" == "+" ]]; then
+                    awk "BEGIN{exit !($dur >= $min_secs)}" && files+=("$f")
+                else
+                    awk "BEGIN{exit !($dur <= $min_secs)}" && files+=("$f")
+                fi
             fi
         done
+        echo
     else
-        files=("${all_files[@]}")
+        files=("${tmp[@]}")
     fi
 
     ((${#files[@]} == 0)) && return 1
     return 0
+}
+
+# Rescan + apply filters
+_scan_files() {
+    _rescan_files
+    _apply_filter
+}
+
+_filter_active() {
+    [[ -n "$FILTER" || $TIME_FILTER -gt 0 ]]
 }
 
 # Wait until a .part file reaches minimum buffered size before playing
@@ -100,7 +138,6 @@ _wait_for_part() {
 }
 
 # Write mpv key bindings to a temp input config
-# Exit code 42 = refresh signal (triggered by 'u' key)
 _create_input_conf() {
     local conf="$1"
     cat > "$conf" <<'EOF'
@@ -126,7 +163,7 @@ EOF
 # Print player header with key bindings
 _show_header() {
     echo -e "${C}____________________________________________________________${R}"
-    echo -e "${C}  MPL PRO v3.0.0 | OFFLINE PLAYER                          ${R}"
+    echo -e "${C}  MPL PRO v3.1.0 | OFFLINE PLAYER                          ${R}"
     echo -e "${C}____________________________________________________________${R}"
     echo -e "${Y}  9 / 0  : Volume down / up              ${R}"
     echo -e "${Y}  , / .  : Seek -10 / +10 sec            ${R}"
@@ -143,15 +180,12 @@ _show_header() {
 _run_mpv() {
     local start_idx="${1:-0}"
 
-    # Wait for .part file to buffer if needed
     local first_file=$(sed -n "$((start_idx+1))p" "$PLAYLIST_FILE")
     [[ -n "$first_file" ]] && _wait_for_part "$first_file"
 
     local input_conf=$(mktemp)
     trap "rm -f '$input_conf'" RETURN
     _create_input_conf "$input_conf"
-
-    local watch_dir="$WATCH_LATER_BASE"
 
     clear
     _show_header
@@ -167,7 +201,7 @@ _run_mpv() {
         --playlist-start="$start_idx" \
         --save-position-on-quit \
         --resume-playback \
-        --watch-later-directory="$watch_dir" \
+        --watch-later-directory="$WATCH_LATER_BASE" \
         --watch-later-options-remove=pause \
         --input-conf="$input_conf" \
         --term-status-msg='[${playlist-pos-1}/${playlist-count}] ${time-pos}/${duration} | V:${volume}%' \
@@ -176,35 +210,22 @@ _run_mpv() {
     return $?
 }
 
-# Main playback loop with live playlist refresh support
-#
-# How 'u' refresh works:
-#   1. User presses 'u' -> mpv exits with code 42
-#   2. We remember which file was playing (by index in old list)
-#   3. Rescan the directory for new/removed files
-#   4. Find the same file in the updated list -> restore index
-#   5. Restart mpv - it auto-resumes position from watch_later
 _play_with_refresh() {
     local start_idx="${1:-0}"
 
     while true; do
-        # Write current file list to playlist
         printf "%s\n" "${files[@]}" > "$PLAYLIST_FILE"
         local count_before=${#files[@]}
 
-        # Start playback
         _run_mpv "$start_idx"
         local exit_code=$?
 
         if [[ $exit_code -eq 42 ]]; then
-            # 'u' was pressed - refresh playlist
             echo -e "\n${G}🔄 Refreshing playlist...${R}"
 
-            # Remember which file was active before refresh
             local current_file="${files[$start_idx]}"
-
-            # Rescan directory
             local old_count=$count_before
+
             if _scan_files; then
                 local new_count=${#files[@]}
                 local added=$((new_count - old_count))
@@ -216,28 +237,73 @@ _play_with_refresh() {
                 return 1
             fi
 
-            # Find the previously playing file in the updated list
             local new_idx=0
             if [[ -n "$current_file" ]]; then
                 for i in "${!files[@]}"; do
                     if [[ "${files[$i]}" == "$current_file" ]]; then
-                        new_idx=$i
-                        break
+                        new_idx=$i; break
                     fi
                 done
             fi
 
             echo -e "${M}📍 Resuming: [track $((new_idx+1))/${#files[@]}] - position restored from watch_later${R}"
             sleep 1
-
             start_idx=$new_idx
-            # Loop continues - mpv will resume exact position automatically
             continue
         else
-            # Normal exit: 'q' pressed or playlist finished
             return 0
         fi
     done
+}
+
+# === DRAW MENU ===
+_draw_menu() {
+    clear
+    echo -e "${C}============================================================${R}"
+    local header="${FULL_DIR}"
+    [[ -n "$FILTER" ]] && header+=" ${Y}[filter: ${FILTER}]${C}"
+    (( TIME_FILTER > 0 )) && header+=" ${M}[time: ${TIME_FILTER_MODE}${TIME_FILTER}min]${C}"
+    echo -e "${C}  ${header}${R}"
+    echo -e "${C}============================================================${R}"
+
+    for i in "${!files[@]}"; do
+        local fname
+        fname=$(basename "${files[$i]}" | cut -c1-56)
+        [[ "$fname" == *.part ]] && fname="📥 $fname"
+        printf " %3d) %s\n" "$((i+1))" "$fname"
+    done
+
+    echo -e "${C}============================================================${R}"
+    echo -e "${Y}  a = play all${R} | ${Y}s = shuffle${R}"
+    echo -e "${Y}  u = refresh${R}  | ${Y}t = time filter${R}"
+    echo -e "${Y}  / = search${R}   | ${Y}q = quit${R}"
+    echo -ne "  Choice: "
+}
+
+# === TIME FILTER HANDLER ===
+_handle_time_filter() {
+    echo -e "\r\033[K"
+    echo -ne "${G}Duration filter (+min or -min, 0=off): ${R}"
+    read -r tmin
+    tmin=$(echo "$tmin" | tr -d ' ')
+    if [[ "$tmin" == "0" ]]; then
+        TIME_FILTER=0
+        TIME_FILTER_MODE=""
+        _apply_filter
+        echo -e "${G}✅ Time filter cleared${R}"; sleep 0.5
+    elif [[ "$tmin" =~ ^[+-][0-9]+$ ]]; then
+        TIME_FILTER=${tmin:1}
+        TIME_FILTER_MODE=${tmin:0:1}
+        if ! _apply_filter; then
+            echo -e "${Y}❌ No files matching duration filter${R}"
+            TIME_FILTER=0
+            TIME_FILTER_MODE=""
+            _apply_filter
+            sleep 1
+        else
+            echo -e "${G}✅ Found ${#files[@]} files${R}"; sleep 0.5
+        fi
+    fi
 }
 
 # === STARTUP ===
@@ -251,30 +317,11 @@ fi
 if [[ "$MODE" == "filter" ]]; then
     echo -e "${C}🔍 Filter: ${Y}${FILTER}${C} — found ${G}${#files[@]}${C} files${R}"
     sleep 0.5
-    # Drop into menu so user can browse the filtered list
 fi
 
-# === MAIN MENU ===
+# === MAIN MENU LOOP ===
 while :; do
-    clear
-    echo -e "${C}============================================================${R}"
-    if [[ -n "$FILTER" ]]; then
-        echo -e "${C}  FILE LIST: ${FULL_DIR} ${Y}[filter: ${FILTER}]${R}"
-    else
-        echo -e "${C}  FILE LIST: ${FULL_DIR}${R}"
-    fi
-    echo -e "${C}============================================================${R}"
-
-    for i in "${!files[@]}"; do
-        fname=$(basename "${files[$i]}" | cut -c1-56)
-        [[ "$fname" == *.part ]] && fname="📥 $fname"
-        printf " %3d) %s\n" "$((i+1))" "$fname"
-    done
-
-    echo -e "${C}============================================================${R}"
-    echo -e "${Y}  a = play all | s = shuffle | u = refresh | q = quit${R}"
-    echo -e "${Y}  / = search | number + ENTER = play${R}"
-    echo -ne "  Choice: "
+    _draw_menu
 
     read -s -r -n 1 key
 
@@ -298,6 +345,9 @@ while :; do
                 sleep 1
             fi
             ;;
+        t|T)
+            _handle_time_filter
+            ;;
         q|Q)
             clear; exit 0
             ;;
@@ -307,15 +357,15 @@ while :; do
             read -r keyword
             if [[ -n "$keyword" ]]; then
                 FILTER="*${keyword}*"
-                if ! _scan_files; then
+                if ! _apply_filter; then
                     echo -e "${Y}❌ No files matching: ${keyword}${R}"
                     FILTER=""
-                    _scan_files 2>/dev/null
+                    _apply_filter 2>/dev/null
                     sleep 1
                 fi
             else
                 FILTER=""
-                _scan_files 2>/dev/null
+                _apply_filter 2>/dev/null
             fi
             ;;
         [0-9])
