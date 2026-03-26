@@ -16,6 +16,9 @@ termux-wake-lock 2>/dev/null || true
 
 # === COLORS ===
 G='\033[1;32m'; Y='\033[1;33m'; C='\033[1;36m'; M='\033[1;35m'; R='\033[0m'
+# Kolory dla argumentów mpv (prawdziwy znak ESC)
+_MC=$'\033[1;36m'
+_MR=$'\033[0m'
 
 # === CONFIG ===
 WATCH_LATER_BASE="$HOME/.config/mpv/watch_later"
@@ -168,7 +171,7 @@ _run_mpv() {
         --watch-later-options-remove=pause \
         --input-conf="$input_conf" \
         --term-status-msg='[${playlist-pos-1}/${playlist-count}] ${time-pos}/${duration} | V:${volume}%' \
-        --term-playing-msg='▶ [${playlist-pos-1}/${playlist-count}] ${filename}'
+        --term-playing-msg="${_MC}▶ [\${playlist-pos-1}/\${playlist-count}] \${filename}${_MR}"
 
     return $?
 }

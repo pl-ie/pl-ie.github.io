@@ -15,7 +15,7 @@
 # Controls (browser):
 #   [number] + ENTER - play file by number
 #   PgUp / PgDn      - scroll pages
-#   a                - play all (filter/time-filter mode)
+#   a                - play all
 #   u                - refresh file list
 #   t                - time filter
 #   /                - search
@@ -28,6 +28,9 @@ G='\033[1;32m'
 Y='\033[1;33m'
 C='\033[1;36m'
 R='\033[0m'
+# Kolory dla argumentów mpv (prawdziwy znak ESC)
+_MC=$'\033[1;36m'
+_MR=$'\033[0m'
 
 # === CONFIG ===
 WATCH_LATER_BASE="$HOME/.config/mpv/watch_later"
@@ -219,7 +222,10 @@ _draw_browser() {
     if _filter_active; then
         echo -e "${Y}a: play all${R} | ${Y}u: refresh${R} | ${Y}t: time filter${R} | ${Y}q: clear filters${R} | ${Y}/: search${R}${footer_info}"
     else
-        echo -e "${Y}PgUp/PgDn${R} | ${Y}u: refresh${R} | ${Y}t: time filter${R} | ${Y}q: quit${R} | ${Y}/: search${R}\n${C}Total: ${dur_val}${R}"
+        echo -e "${Y}a: play all${R} | ${Y}PgUp/PgDn${R}"
+        echo -e "${Y}u: refresh${R}  | ${Y}t: time filter${R}"
+        echo -e "${Y}/: search${R}   | ${Y}q: quit${R}"
+        echo -e "${C}Total: ${dur_val}${R}"
     fi
     echo -ne "${Y}Page: $((CURRENT_PAGE+1))/$total_pages${R} | ${G}Choice:${R} "
 }
@@ -234,8 +240,8 @@ _show_playback_header() {
     echo -e "\n${Y}  ↑ / ↓  : Seek +120 / -120 sec${R}"
     echo -e "\n${Y}  n / b  : Next / Previous${R}"
     echo -e "\n${Y}  SPACE  : Pause | s: Loop${R}"
-    echo -e "\n${Y}  HOME   : Restart from beginning${R}"
-    echo -e "\n${Y}  u: Refresh playlist  |  q: Menu${R}"
+    echo -e "\n${Y}  HOME   : Restart  |  q: Menu${R}"
+    echo -e "\n${Y}  u: Refresh playlist${R}"
     echo -e "\n${C}____________________________________________________________${R}"
 }
 
@@ -282,7 +288,7 @@ _run_mpv() {
         --watch-later-options-remove=pause \
         --input-conf="$INPUT_CONF" \
         --term-status-msg='[${playlist-pos-1}/${playlist-count}] ${time-pos}/${duration} | V:${volume}%' \
-        --term-playing-msg='▶ [${playlist-pos-1}/${playlist-count}] ${filename}'
+        --term-playing-msg="${_MC}▶ [\${playlist-pos-1}/\${playlist-count}] \${filename}${_MR}"
 
     return $?
 }
@@ -382,9 +388,14 @@ _handle_number() {
 }
 
 _handle_play_all() {
-    _filter_active || return
-    (( ${#DISPLAY_FILES[@]} == 0 )) && return
-    local first_file="${DISPLAY_FILES[0]}"
+    local source_list=()
+    if _filter_active; then
+        source_list=("${DISPLAY_FILES[@]}")
+    else
+        source_list=("${ALL_FILES[@]}")
+    fi
+    (( ${#source_list[@]} == 0 )) && return
+    local first_file="${source_list[0]}"
     local play_idx=0
     for j in "${!ALL_FILES[@]}"; do
         [[ "${ALL_FILES[$j]}" == "$first_file" ]] && { play_idx=$j; break; }
