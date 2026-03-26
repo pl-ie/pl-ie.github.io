@@ -283,7 +283,7 @@ _draw_menu() {
 # === TIME FILTER HANDLER ===
 _handle_time_filter() {
     echo -e "\r\033[K"
-    echo -ne "${G}Duration filter (+min or -min, 0=off): ${R}"
+    echo -ne "${G}Duration filter (+min / -min / min, 0=off): ${R}"
     read -r tmin
     tmin=$(echo "$tmin" | tr -d ' ')
     if [[ "$tmin" == "0" ]]; then
@@ -291,9 +291,14 @@ _handle_time_filter() {
         TIME_FILTER_MODE=""
         _apply_filter
         echo -e "${G}✅ Time filter cleared${R}"; sleep 0.5
-    elif [[ "$tmin" =~ ^[+-][0-9]+$ ]]; then
-        TIME_FILTER=${tmin:1}
-        TIME_FILTER_MODE=${tmin:0:1}
+    elif [[ "$tmin" =~ ^[+-]?[0-9]+$ ]]; then
+        if [[ "$tmin" =~ ^[+-] ]]; then
+            TIME_FILTER=${tmin:1}
+            TIME_FILTER_MODE=${tmin:0:1}
+        else
+            TIME_FILTER=$tmin
+            TIME_FILTER_MODE="+"
+        fi
         if ! _apply_filter; then
             echo -e "${Y}❌ No files matching duration filter${R}"
             TIME_FILTER=0

@@ -111,7 +111,10 @@ _apply_filter() {
     if (( TIME_FILTER > 0 )); then
         local min_secs=$(( TIME_FILTER * 60 ))
         DISPLAY_FILES=()
+        local count=0 total=${#tmp_files[@]}
         for f in "${tmp_files[@]}"; do
+            count=$((count+1))
+            printf "\r${C}Scanning: %d/%d  found: %d${R}" "$count" "$total" "${#DISPLAY_FILES[@]}"
             local dur
             dur=$(ffprobe -v quiet \
                 -show_entries format=duration \
@@ -125,6 +128,7 @@ _apply_filter() {
                 fi
             fi
         done
+        echo
     else
         DISPLAY_FILES=("${tmp_files[@]}")
     fi
@@ -406,17 +410,21 @@ _handle_play_all() {
 
 _handle_time_filter() {
     echo -e "\r\033[K"
-    echo -ne "${G}Duration filter (+min or -min, 0=off): ${R}"
+    echo -ne "${G}Duration filter (+min / -min / min, 0=off): ${R}"
     read -r tmin
     tmin=$(echo "$tmin" | tr -d ' ')
     if [[ "$tmin" == "0" ]]; then
         TIME_FILTER=0
         TIME_FILTER_MODE=""
         _apply_filter
-    elif [[ "$tmin" =~ ^[+-][0-9]+$ ]]; then
-        TIME_FILTER=${tmin:1}
-        TIME_FILTER_MODE=${tmin:0:1}
-        echo -e "${C}Scanning durations...${R}"
+    elif [[ "$tmin" =~ ^[+-]?[0-9]+$ ]]; then
+        if [[ "$tmin" =~ ^[+-] ]]; then
+            TIME_FILTER=${tmin:1}
+            TIME_FILTER_MODE=${tmin:0:1}
+        else
+            TIME_FILTER=$tmin
+            TIME_FILTER_MODE="+"
+        fi
         _apply_filter
         if (( ${#DISPLAY_FILES[@]} == 0 )); then
             echo -e "${Y}No files matching duration filter${R}"
