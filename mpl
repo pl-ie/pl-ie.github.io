@@ -196,7 +196,7 @@ _run_mpv() {
         --no-input-default-bindings \
         --input-ar-delay=1000 \
         --input-ar-rate=1 \
-        --volume=60 \
+        --volume=70 \
         --playlist="$PLAYLIST_FILE" \
         --playlist-start="$start_idx" \
         --save-position-on-quit \

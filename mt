@@ -224,7 +224,13 @@ _draw_browser() {
         footer_info+=" | ${C}Time: ${TIME_FILTER_MODE}${TIME_FILTER}min (${#DISPLAY_FILES[@]} files)${R}"
 
     if _filter_active; then
-        echo -e "${Y}a: play all${R} | ${Y}u: refresh${R} | ${Y}t: time filter${R} | ${Y}q: clear filters${R} | ${Y}/: search${R}${footer_info}"
+        local filter_info=""
+        [[ -n "$FILTER" ]] && filter_info="${C}Filter: ${FILTER}${R}"
+        (( TIME_FILTER > 0 )) && filter_info+="${filter_info:+ | }${C}Time: ${TIME_FILTER_MODE}${TIME_FILTER}min (${#DISPLAY_FILES[@]} files)${R}"
+        echo -e "${Y}a: play all${R} | ${Y}PgUp/PgDn${R}"
+        echo -e "${Y}u: refresh${R}  | ${Y}t: time filter${R}"
+        echo -e "${Y}/: search${R}   | ${Y}q: clear filters${R}"
+        [[ -n "$filter_info" ]] && echo -e "$filter_info"
     else
         echo -e "${Y}a: play all${R} | ${Y}PgUp/PgDn${R}"
         echo -e "${Y}u: refresh${R}  | ${Y}t: time filter${R}"
@@ -283,7 +289,7 @@ _run_mpv() {
         --no-input-default-bindings \
         --input-ar-delay=1000 \
         --input-ar-rate=1 \
-        --volume=60 \
+        --volume=70 \
         --playlist="$PLAYLIST_FILE" \
         --playlist-start="$start_idx" \
         --save-position-on-quit \
