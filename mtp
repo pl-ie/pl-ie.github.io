@@ -81,16 +81,14 @@ _show_file_info() {
     echo -e "${C}____________________________________________________________${R}"
     echo -e "${C}  MTP v1.2 | MEDIA TAIL PLAYER                            ${R}"
     echo -e "${C}____________________________________________________________${R}"
-    echo -e "${Y}  9 / 0    : Volume down / up                ${R}"
-    echo -e "${Y}  , / .    : Seek -10 / +10 sec              ${R}"
-    echo -e "${Y}  ← / →    : Seek -20 / +20 sec              ${R}"
-    echo -e "${Y}  ↑ / ↓    : Seek +120 / -120 sec            ${R}"
-    echo -e "${Y}  SPACE    : Pause / Resume                  ${R}"
-    echo -e "${Y}  r / HOME : Restart file                    ${R}"
-    echo -e "${Y}  o        : OSD cache info                  ${R}"
-    echo -e "${Y}  e        : EOF menu                        ${R}"
-    echo -e "${Y}  u        : Refresh (more buffer)           ${R}"
-    echo -e "${Y}  q        : Quit (saves position)           ${R}"
+    echo -e "${Y}  9 / 0  : Volume down / up              ${R}"
+    echo -e "${Y}  , / .  : Seek -10 / +10 sec            ${R}"
+    echo -e "${Y}  ← / →  : Seek -20 / +20 sec            ${R}"
+    echo -e "${Y}  ↑ / ↓  : Seek +120 / -120 sec          ${R}"
+    echo -e "${Y}  SPACE  : Pause / Resume                 ${R}"
+    echo -e "${Y}  r/HOME : Restart |  u: Refresh         ${R}"
+    echo -e "${Y}  q      : Quit    |  o: OSD             ${R}"
+    echo -e "${Y}  e      : EOF menu                      ${R}"
     echo -e "${C}____________________________________________________________${R}"
     if [[ "$file" == *.part ]]; then
         echo -e "${Y}📥 Downloading (.part)${R}"
@@ -156,6 +154,9 @@ _run_mpv() {
         start_param="--start=${saved_pos}"
     fi
 
+    local _MC=$'\033[1;36m'
+    local _MR=$'\033[0m'
+
     mpv \
         --volume=70 \
         --keep-open="$keep_open" \
@@ -173,6 +174,8 @@ _run_mpv() {
         --save-position-on-quit \
         --watch-later-directory="$session_dir" \
         --title="MTP: $(basename "$file")" \
+        --term-status-msg='${time-pos}/${duration} | V:${volume}%' \
+        --term-playing-msg="${_MC}▶ \${filename}${_MR}" \
         $start_param \
         "$file"
 
