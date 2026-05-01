@@ -66,6 +66,7 @@ s cycle-values loop-playlist inf no
 HOME seek 0 absolute
 u quit 42
 q quit 43
+g quit 44
 ENTER playlist-next
 EOF
 }
@@ -252,6 +253,7 @@ _show_playback_header() {
     echo -e "\n${Y}  SPACE  : Pause | s: Loop${R}"
     echo -e "\n${Y}  HOME   : Restart  |  q: Menu${R}"
     echo -e "\n${Y}  u: Refresh playlist${R}"
+    echo -e "\n${Y}  g: Go to track${R}"
     echo -e "\n${C}____________________________________________________________${R}"
 }
 
@@ -334,13 +336,35 @@ _play_with_refresh() {
             sleep 1
             all_start_idx=$new_idx
             continue
+        elif [[ $exit_code -eq 44 ]]; then
+            local play_list=()
+            if _filter_active; then
+                play_list=("${DISPLAY_FILES[@]}")
+            else
+                play_list=("${ALL_FILES[@]}")
+            fi
+            echo -ne "\n${G}Go to track (1-${#play_list[@]}): ${R}"
+            read -r goto_num
+            goto_num=$(echo "$goto_num" | tr -cd '0-9')
+            if [[ -n "$goto_num" ]]; then
+                local goto_pl_idx=$((goto_num - 1))
+                if (( goto_pl_idx >= 0 && goto_pl_idx < ${#play_list[@]} )); then
+                    local target_file="${play_list[$goto_pl_idx]}"
+                    local new_all_idx=0
+                    for i in "${!ALL_FILES[@]}"; do
+                        [[ "${ALL_FILES[$i]}" == "$target_file" ]] && { new_all_idx=$i; break; }
+                    done
+                    all_start_idx=$new_all_idx
+                else
+                    echo -e "${Y}❌ Brak tracku: $goto_num${R}"; sleep 1
+                fi
+            fi
+            continue
         else
             return 0
         fi
     done
 }
-
-# === HANDLERS ===
 
 _handle_search() {
     echo -e "\r\033[K"

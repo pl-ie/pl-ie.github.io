@@ -155,6 +155,7 @@ b playlist-prev
 s cycle-values loop-playlist inf no ; show-text "Loop: ${loop-playlist}"
 HOME seek 0 absolute
 u quit 42
+g quit 43
 q quit
 ENTER playlist-next
 EOF
@@ -173,6 +174,7 @@ _show_header() {
     echo -e "${Y}  SPACE  : Pause | s: Shuffle            ${R}"
     echo -e "${Y}  HOME   : Restart | q: Menu              ${R}"
     echo -e "${Y}  u: Refresh playlist                    ${R}"
+    echo -e "${Y}  g: Go to track                         ${R}"
     echo -e "${C}____________________________________________________________${R}"
 }
 
@@ -250,6 +252,21 @@ _play_with_refresh() {
             sleep 1
             start_idx=$new_idx
             continue
+
+        elif [[ $exit_code -eq 43 ]]; then
+            echo -ne "\n${G}Go to track (1-${#files[@]}): ${R}"
+            read -r goto_num
+            goto_num=$(echo "$goto_num" | tr -cd '0-9')
+            if [[ -n "$goto_num" ]]; then
+                local goto_idx=$((goto_num - 1))
+                if (( goto_idx >= 0 && goto_idx < ${#files[@]} )); then
+                    start_idx=$goto_idx
+                else
+                    echo -e "${Y}❌ Brak tracku: $goto_num${R}"; sleep 1
+                fi
+            fi
+            continue
+
         else
             return 0
         fi
@@ -276,7 +293,8 @@ _draw_menu() {
     echo -e "${C}============================================================${R}"
     echo -e "${Y}  a = play all${R} | ${Y}s = shuffle${R}"
     echo -e "${Y}  u = refresh${R}  | ${Y}t = time filter${R}"
-    echo -e "${Y}  / = search${R}   | ${Y}q = quit${R}"
+    echo -e "${Y}  / = search${R}   | ${Y}g = go to track${R}"
+    echo -e "${Y}  q = quit${R}"
     echo -ne "  Choice: "
 }
 
@@ -353,6 +371,19 @@ while :; do
             ;;
         q|Q)
             clear; exit 0
+            ;;
+        g|G)
+            echo -ne "\n${G}Go to track (1-${#files[@]}): ${R}"
+            read -r goto_num
+            goto_num=$(echo "$goto_num" | tr -cd '0-9')
+            if [[ -n "$goto_num" ]]; then
+                goto_idx=$((goto_num - 1))
+                if (( goto_idx >= 0 && goto_idx < ${#files[@]} )); then
+                    _play_with_refresh "$goto_idx"
+                else
+                    echo -e "${Y}❌ Brak tracku: $goto_num${R}"; sleep 1
+                fi
+            fi
             ;;
         /)
             echo -e "\r\033[K"
