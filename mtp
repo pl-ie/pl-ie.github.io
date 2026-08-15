@@ -117,15 +117,34 @@ _get_saved_pos() {
     fi
 }
 
+_get_saved_vol() {
+    local session_dir="$1"
+    local vol_file="$session_dir/volume.txt"
+    if [[ -f "$vol_file" ]]; then
+        cat "$vol_file"
+    fi
+}
+
 _save_pos_from_session() {
     # Read start= from any mpv watch_later file in session_dir and save to position.txt
     local session_dir="$1"
     local pos_file="$session_dir/position.txt"
+    local vol_file="$session_dir/volume.txt"
     local saved
-    saved=$(find "$session_dir" -type f ! -name "position.txt" 2>/dev/null \
+    saved=$(find "$session_dir" -type f ! -name "position.txt" ! -name "volume.txt" 2>/dev/null \
             | xargs grep -h "^start=" 2>/dev/null | tail -1 | cut -d'=' -f2)
     if [[ -n "$saved" ]]; then
         echo "$saved" > "$pos_file"
+    fi
+
+    # Read volume= the same way, keep it in memory for this run of mtp
+    # AND persist to disk so it survives full script quit/restart on this file
+    local vol
+    vol=$(find "$session_dir" -type f ! -name "position.txt" ! -name "volume.txt" 2>/dev/null \
+          | xargs grep -h "^volume=" 2>/dev/null | tail -1 | cut -d'=' -f2)
+    if [[ -n "$vol" ]]; then
+        LAST_VOLUME="$vol"
+        echo "$vol" > "$vol_file"
     fi
 }
 
@@ -154,11 +173,16 @@ _run_mpv() {
         start_param="--start=${saved_pos}"
     fi
 
+    # Volume priority: on-disk volume.txt (survives full quit/restart) > in-memory LAST_VOLUME > 70 default
+    local saved_vol
+    saved_vol=$(_get_saved_vol "$session_dir")
+    local vol_param="${saved_vol:-${LAST_VOLUME:-70}}"
+
     local _MC=$'\033[1;36m'
     local _MR=$'\033[0m'
 
     mpv \
-        --volume=70 \
+        --volume="$vol_param" \
         --keep-open="$keep_open" \
         --no-input-default-bindings \
         --input-conf="$input_conf" \

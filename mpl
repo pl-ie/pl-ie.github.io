@@ -23,6 +23,7 @@ _MR=$'\033[0m'
 # === CONFIG ===
 WATCH_LATER_BASE="$HOME/.config/mpv/watch_later"
 mkdir -p "$WATCH_LATER_BASE"
+VOL_FILE="$WATCH_LATER_BASE/volume.txt"
 
 PLAYLIST_FILE=$(mktemp)
 trap "rm -f '$PLAYLIST_FILE'" EXIT
@@ -178,6 +179,48 @@ _show_header() {
     echo -e "${C}____________________________________________________________${R}"
 }
 
+# Read last saved volume: on-disk VOL_FILE (survives quit/restart) > in-memory LAST_VOLUME > 70 default
+_get_saved_volume() {
+    if [[ -f "$VOL_FILE" ]]; then
+        cat "$VOL_FILE"
+    fi
+}
+
+# After mpv exits, find the most recently modified watch_later file, follow
+# mpv's "# redirect entry" if the real data lives in another file (happens
+# when the original filename is too long), and read volume= from it.
+# Saves both in memory (LAST_VOLUME) and on disk (VOL_FILE).
+_save_volume_from_watch_later() {
+    local wl_file=""
+    local newest_time=0
+    local f mtime
+
+    for f in "$WATCH_LATER_BASE"/*; do
+        [[ -f "$f" ]] || continue
+        [[ "$(basename "$f")" == "volume.txt" ]] && continue
+        mtime=$(stat -c%Y "$f" 2>/dev/null || stat -f%m "$f" 2>/dev/null)
+        if [[ -n "$mtime" ]] && (( mtime > newest_time )); then
+            newest_time=$mtime
+            wl_file="$f"
+        fi
+    done
+    [[ -z "$wl_file" ]] && return
+
+    # Follow redirect entry (used when the original filename was too long)
+    if [[ "$(head -1 "$wl_file" 2>/dev/null)" == "# redirect entry" ]]; then
+        local target
+        target=$(sed -n '2p' "$wl_file")
+        [[ -n "$target" && -f "$target" ]] && wl_file="$target"
+    fi
+
+    local vol
+    vol=$(grep -h "^volume=" "$wl_file" 2>/dev/null | tail -1 | cut -d'=' -f2)
+    if [[ -n "$vol" ]]; then
+        LAST_VOLUME="$vol"
+        echo "$vol" > "$VOL_FILE"
+    fi
+}
+
 # Launch mpv with the current PLAYLIST_FILE starting at given index
 _run_mpv() {
     local start_idx="${1:-0}"
@@ -189,6 +232,11 @@ _run_mpv() {
     trap "rm -f '$input_conf'" RETURN
     _create_input_conf "$input_conf"
 
+    # Volume priority: on-disk VOL_FILE (survives full quit/restart) > in-memory LAST_VOLUME > 70 default
+    local saved_vol
+    saved_vol=$(_get_saved_volume)
+    local vol_param="${saved_vol:-${LAST_VOLUME:-70}}"
+
     clear
     _show_header
 
@@ -198,7 +246,7 @@ _run_mpv() {
         --no-input-default-bindings \
         --input-ar-delay=1000 \
         --input-ar-rate=1 \
-        --volume=70 \
+        --volume="$vol_param" \
         --playlist="$PLAYLIST_FILE" \
         --playlist-start="$start_idx" \
         --save-position-on-quit \
@@ -209,7 +257,9 @@ _run_mpv() {
         --term-status-msg='[${playlist-pos-1}/${playlist-count}] ${time-pos}/${duration} | V:${volume}%' \
         --term-playing-msg="${_MC}▶ [\${playlist-pos-1}/\${playlist-count}] \${filename}${_MR}"
 
-    return $?
+    local exit_code=$?
+    _save_volume_from_watch_later
+    return $exit_code
 }
 
 _play_with_refresh() {
