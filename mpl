@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# MPL PRO v3.1.0 - Media Playlist Player
+# MPL PRO v3.2.0 - Media Playlist Player
 # Play local audio/video files with playlist management
 # Press 'u' during playback to refresh the playlist without losing your position
+# Press 'd' in menu to toggle sort: newest-first <-> name (default)
+# Press 'o' in menu to toggle sort: oldest-first <-> name (default)
 #
 # Usage:
 #   mpl                  - open interactive menu in current directory
@@ -16,7 +18,7 @@ termux-wake-lock 2>/dev/null || true
 
 # === COLORS ===
 G='\033[1;32m'; Y='\033[1;33m'; C='\033[1;36m'; M='\033[1;35m'; R='\033[0m'
-# Kolory dla argumentów mpv (prawdziwy znak ESC)
+# Colors for mpv arguments (real ESC character)
 _MC=$'\033[1;36m'
 _MR=$'\033[0m'
 
@@ -34,6 +36,7 @@ DIR="."
 FILTER=""
 TIME_FILTER=0
 TIME_FILTER_MODE=""
+SORT_MODE="name"   # "name" (default, sort -V), "newest" or "oldest"
 ALL_FILES=()
 files=()
 
@@ -57,16 +60,32 @@ FULL_DIR=$(realpath "$DIR" 2>/dev/null || echo "$DIR")
 
 # === FUNCTIONS ===
 
-# Raw scan → ALL_FILES
+# Raw scan -> ALL_FILES (respects SORT_MODE)
 _rescan_files() {
-    mapfile -t ALL_FILES < <(find "$FULL_DIR" -maxdepth 1 -type f \( \
-        -iname "*.mp3" -o -iname "*.opus" -o -iname "*.ogg" -o \
-        -iname "*.flac" -o -iname "*.m4a" -o -iname "*.wav" -o \
-        -iname "*.mp4" -o -iname "*.webm" -o -iname "*.mkv" -o \
-        -iname "*.part" \) 2>/dev/null | sort -V)
+    if [[ "$SORT_MODE" == "newest" ]]; then
+        mapfile -t ALL_FILES < <(find "$FULL_DIR" -maxdepth 1 -type f \( \
+            -iname "*.mp3" -o -iname "*.opus" -o -iname "*.ogg" -o \
+            -iname "*.flac" -o -iname "*.m4a" -o -iname "*.wav" -o \
+            -iname "*.mp4" -o -iname "*.webm" -o -iname "*.mkv" -o \
+            -iname "*.part" \) -printf '%T@ %p\n' 2>/dev/null \
+            | sort -rn | cut -d' ' -f2-)
+    elif [[ "$SORT_MODE" == "oldest" ]]; then
+        mapfile -t ALL_FILES < <(find "$FULL_DIR" -maxdepth 1 -type f \( \
+            -iname "*.mp3" -o -iname "*.opus" -o -iname "*.ogg" -o \
+            -iname "*.flac" -o -iname "*.m4a" -o -iname "*.wav" -o \
+            -iname "*.mp4" -o -iname "*.webm" -o -iname "*.mkv" -o \
+            -iname "*.part" \) -printf '%T@ %p\n' 2>/dev/null \
+            | sort -n | cut -d' ' -f2-)
+    else
+        mapfile -t ALL_FILES < <(find "$FULL_DIR" -maxdepth 1 -type f \( \
+            -iname "*.mp3" -o -iname "*.opus" -o -iname "*.ogg" -o \
+            -iname "*.flac" -o -iname "*.m4a" -o -iname "*.wav" -o \
+            -iname "*.mp4" -o -iname "*.webm" -o -iname "*.mkv" -o \
+            -iname "*.part" \) 2>/dev/null | sort -V)
+    fi
 }
 
-# Apply text filter + time filter → files[]
+# Apply text filter + time filter -> files[]
 _apply_filter() {
     local tmp=()
 
@@ -128,13 +147,13 @@ _wait_for_part() {
 
     local size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
     if [[ -z "$size" ]] || (( size < 1048576 )); then
-        echo -e "${Y}📥 Buffering .part file...${R}"
+        echo -e "${Y}Buffering .part file...${R}"
         while [[ -z "$size" ]] || (( size < 1048576 )); do
             sleep 1
             size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
-            printf "\r${M}📊 Downloaded: $((size/1024)) KB${R}"
+            printf "\r${M}Downloaded: $((size/1024)) KB${R}"
         done
-        echo -e "\n${G}✅ Ready - starting playback${R}"
+        echo -e "\n${G}Ready - starting playback${R}"
     fi
 }
 
@@ -165,12 +184,12 @@ EOF
 # Print player header with key bindings
 _show_header() {
     echo -e "${C}____________________________________________________________${R}"
-    echo -e "${C}  MPL PRO v3.1.0 | OFFLINE PLAYER                          ${R}"
+    echo -e "${C}  MPL PRO v3.2.0 | OFFLINE PLAYER                          ${R}"
     echo -e "${C}____________________________________________________________${R}"
     echo -e "${Y}  9 / 0  : Volume down / up              ${R}"
     echo -e "${Y}  , / .  : Seek -10 / +10 sec            ${R}"
-    echo -e "${Y}  ← / →  : Seek -20 / +20 sec            ${R}"
-    echo -e "${Y}  ↑ / ↓  : Seek +120 / -120 sec          ${R}"
+    echo -e "${Y}  Left/Right : Seek -20 / +20 sec        ${R}"
+    echo -e "${Y}  Up/Down    : Seek +120 / -120 sec      ${R}"
     echo -e "${Y}  n / b  : Next / Previous               ${R}"
     echo -e "${Y}  SPACE  : Pause | s: Shuffle            ${R}"
     echo -e "${Y}  HOME   : Restart | q: Menu              ${R}"
@@ -273,7 +292,7 @@ _play_with_refresh() {
         local exit_code=$?
 
         if [[ $exit_code -eq 42 ]]; then
-            echo -e "\n${G}🔄 Refreshing playlist...${R}"
+            echo -e "\n${G}Refreshing playlist...${R}"
 
             local current_file="${files[$start_idx]}"
             local old_count=$count_before
@@ -282,9 +301,9 @@ _play_with_refresh() {
                 local new_count=${#files[@]}
                 local added=$((new_count - old_count))
                 [[ $added -lt 0 ]] && added=0
-                echo -e "${G}✅ Files: ${old_count} -> ${new_count} (+${added} new)${R}"
+                echo -e "${G}Files: ${old_count} -> ${new_count} (+${added} new)${R}"
             else
-                echo -e "${Y}❌ No files found - returning to menu${R}"
+                echo -e "${Y}No files found - returning to menu${R}"
                 sleep 1
                 return 1
             fi
@@ -298,7 +317,7 @@ _play_with_refresh() {
                 done
             fi
 
-            echo -e "${M}📍 Resuming: [track $((new_idx+1))/${#files[@]}] - position restored from watch_later${R}"
+            echo -e "${M}Resuming: [track $((new_idx+1))/${#files[@]}] - position restored from watch_later${R}"
             sleep 1
             start_idx=$new_idx
             continue
@@ -312,7 +331,7 @@ _play_with_refresh() {
                 if (( goto_idx >= 0 && goto_idx < ${#files[@]} )); then
                     start_idx=$goto_idx
                 else
-                    echo -e "${Y}❌ Brak tracku: $goto_num${R}"; sleep 1
+                    echo -e "${Y}No such track: $goto_num${R}"; sleep 1
                 fi
             fi
             continue
@@ -330,13 +349,15 @@ _draw_menu() {
     local header="${FULL_DIR}"
     [[ -n "$FILTER" ]] && header+=" ${Y}[filter: ${FILTER}]${C}"
     (( TIME_FILTER > 0 )) && header+=" ${M}[time: ${TIME_FILTER_MODE}${TIME_FILTER}min]${C}"
+    [[ "$SORT_MODE" == "newest" ]] && header+=" ${G}[sort: newest]${C}"
+    [[ "$SORT_MODE" == "oldest" ]] && header+=" ${G}[sort: oldest]${C}"
     echo -e "${C}  ${header}${R}"
     echo -e "${C}============================================================${R}"
 
     for i in "${!files[@]}"; do
         local fname
         fname=$(basename "${files[$i]}" | cut -c1-56)
-        [[ "$fname" == *.part ]] && fname="📥 $fname"
+        [[ "$fname" == *.part ]] && fname="[DL] $fname"
         printf " %3d) %s\n" "$((i+1))" "$fname"
     done
 
@@ -344,6 +365,7 @@ _draw_menu() {
     echo -e "${Y}  a = play all${R} | ${Y}s = shuffle${R}"
     echo -e "${Y}  u = refresh${R}  | ${Y}t = time filter${R}"
     echo -e "${Y}  / = search${R}   | ${Y}g = go to track${R}"
+    echo -e "${Y}  d / o = sort: newest / oldest${R}"
     echo -e "${Y}  q = quit${R}"
     echo -ne "  Choice: "
 }
@@ -358,7 +380,7 @@ _handle_time_filter() {
         TIME_FILTER=0
         TIME_FILTER_MODE=""
         _apply_filter
-        echo -e "${G}✅ Time filter cleared${R}"; sleep 0.5
+        echo -e "${G}Time filter cleared${R}"; sleep 0.5
     elif [[ "$tmin" =~ ^[+-]?[0-9]+$ ]]; then
         if [[ "$tmin" =~ ^[+-] ]]; then
             TIME_FILTER=${tmin:1}
@@ -368,19 +390,19 @@ _handle_time_filter() {
             TIME_FILTER_MODE="+"
         fi
         if ! _apply_filter; then
-            echo -e "${Y}❌ No files matching duration filter${R}"
+            echo -e "${Y}No files matching duration filter${R}"
             TIME_FILTER=0
             TIME_FILTER_MODE=""
             _apply_filter
             sleep 1
         else
-            echo -e "${G}✅ Found ${#files[@]} files${R}"; sleep 0.5
+            echo -e "${G}Found ${#files[@]} files${R}"; sleep 0.5
         fi
     fi
 }
 
 # === STARTUP ===
-_scan_files || { echo -e "${Y}❌ No media files found in: $FULL_DIR${R}"; exit 1; }
+_scan_files || { echo -e "${Y}No media files found in: $FULL_DIR${R}"; exit 1; }
 
 if [[ "$MODE" == "playlist" ]]; then
     _play_with_refresh 0
@@ -388,7 +410,7 @@ if [[ "$MODE" == "playlist" ]]; then
 fi
 
 if [[ "$MODE" == "filter" ]]; then
-    echo -e "${C}🔍 Filter: ${Y}${FILTER}${C} — found ${G}${#files[@]}${C} files${R}"
+    echo -e "${C}Filter: ${Y}${FILTER}${C} - found ${G}${#files[@]}${C} files${R}"
     sleep 0.5
 fi
 
@@ -407,17 +429,47 @@ while :; do
             _play_with_refresh 0
             ;;
         u|U)
-            echo -e "\n${G}🔄 Refreshing file list...${R}"
+            echo -e "\n${G}Refreshing file list...${R}"
             if _scan_files; then
-                echo -e "${G}✅ Found ${#files[@]} files${R}"
+                echo -e "${G}Found ${#files[@]} files${R}"
                 sleep 0.5
             else
-                echo -e "${Y}❌ No files found in directory${R}"
+                echo -e "${Y}No files found in directory${R}"
                 sleep 1
             fi
             ;;
         t|T)
             _handle_time_filter
+            ;;
+        d|D)
+            # Toggle: name <-> newest (pressing 'd' again returns to name)
+            if [[ "$SORT_MODE" == "newest" ]]; then
+                SORT_MODE="name"
+            else
+                SORT_MODE="newest"
+            fi
+            if _scan_files; then
+                echo -e "${G}Sort: $( [[ "$SORT_MODE" == "newest" ]] && echo "newest first" || echo "by name" )${R}"
+                sleep 0.5
+            else
+                echo -e "${Y}No files found${R}"
+                sleep 1
+            fi
+            ;;
+        o|O)
+            # Toggle: name <-> oldest (pressing 'o' again returns to name)
+            if [[ "$SORT_MODE" == "oldest" ]]; then
+                SORT_MODE="name"
+            else
+                SORT_MODE="oldest"
+            fi
+            if _scan_files; then
+                echo -e "${G}Sort: $( [[ "$SORT_MODE" == "oldest" ]] && echo "oldest first" || echo "by name" )${R}"
+                sleep 0.5
+            else
+                echo -e "${Y}No files found${R}"
+                sleep 1
+            fi
             ;;
         q|Q)
             clear; exit 0
@@ -431,7 +483,7 @@ while :; do
                 if (( goto_idx >= 0 && goto_idx < ${#files[@]} )); then
                     _play_with_refresh "$goto_idx"
                 else
-                    echo -e "${Y}❌ Brak tracku: $goto_num${R}"; sleep 1
+                    echo -e "${Y}No such track: $goto_num${R}"; sleep 1
                 fi
             fi
             ;;
@@ -442,7 +494,7 @@ while :; do
             if [[ -n "$keyword" ]]; then
                 FILTER="*${keyword}*"
                 if ! _apply_filter; then
-                    echo -e "${Y}❌ No files matching: ${keyword}${R}"
+                    echo -e "${Y}No files matching: ${keyword}${R}"
                     FILTER=""
                     _apply_filter 2>/dev/null
                     sleep 1
