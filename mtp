@@ -1,8 +1,9 @@
 #!/bin/bash
-# MTP v1.2 - Media Tail Player
+# MTP v1.3 - Media Tail Player
 # Play .part files while downloading, recording or generating TTS
 # r = refresh (resume with more buffer)
 # q = quit (saves position)
+# v1.3: auto-reload of growing .part files (detects size/duration change)
 
 G='\033[1;32m'
 Y='\033[1;33m'
@@ -71,6 +72,123 @@ q quit 4
 EOF
 }
 
+# mpv Lua script: watches a growing file (.part, TTS .wav, recording) and reloads it in place
+# (same position) when new data appeared and playback is near the end of
+# what mpv currently knows. Also shows file size in the status line and
+# an OSD note when the track duration changes.
+_create_grow_lua() {
+    local lua="$1"
+    cat > "$lua" <<'EOF'
+local utils = require 'mp.utils'
+
+local INTERVAL   = 2        -- seconds between checks
+local MIN_GROWTH = 65536    -- bytes of new data needed to trigger reload
+local NEAR_END   = 15       -- reload when less than this many seconds remain
+local COOLDOWN   = 3        -- minimum seconds between reloads
+
+local path, last_size, last_dur = nil, 0, nil
+local last_reload = 0
+-- est_mode: mpv's duration is only an ESTIMATE from file size / bitrate
+-- (growing WAV, raw recordings), so it goes stale while the file grows.
+-- Files with real duration in metadata (yt-dlp .part etc.) are left alone.
+local est_mode, load_size, load_dur, checked = false, 0, nil, false
+
+local function fsize()
+    if not path then return nil end
+    local fi = utils.file_info(path)
+    return fi and fi.size or nil
+end
+
+local function fmt(t)
+    t = math.floor(t + 0.5)
+    return string.format("%d:%02d", math.floor(t / 60), t % 60)
+end
+
+local function hms(t)
+    t = math.floor(t + 0.5)
+    return string.format("%02d:%02d:%02d",
+        math.floor(t / 3600), math.floor((t % 3600) / 60), t % 60)
+end
+
+local function audio_bitrate()
+    local tl = mp.get_property_native("track-list")
+    if tl then
+        for _, t in ipairs(tl) do
+            if t.type == "audio" and t["demux-bitrate"] then
+                return t["demux-bitrate"]
+            end
+        end
+    end
+    return mp.get_property_number("audio-bitrate")
+end
+
+-- Is the reported duration just size/bitrate? If duration matches what the
+-- current file size implies (within 5%), it is an estimate and will grow.
+local function detect()
+    local d = mp.get_property_number("duration")
+    if not d or d <= 0 then return end
+    checked = true
+    load_size = fsize() or 0
+    load_dur = d
+    est_mode = false
+    local br = audio_bitrate()
+    if br and br > 0 and load_size > 0 then
+        est_mode = math.abs((load_size * 8 / br) / d - 1) < 0.05
+    elseif path and path:lower():match("%.wav$") then
+        est_mode = true
+    end
+end
+
+mp.register_event("file-loaded", function()
+    path = mp.get_property("path")
+    last_size = fsize() or 0
+    last_reload = mp.get_time()
+    checked = false
+    detect()
+end)
+
+mp.observe_property("duration", "number", function(_, d)
+    if not d then return end
+    if last_dur and math.abs(d - last_dur) > 1 then
+        mp.osd_message("Duration: " .. fmt(last_dur) .. " -> " .. fmt(d), 3)
+    end
+    last_dur = d
+end)
+
+mp.add_periodic_timer(INTERVAL, function()
+    if not path then return end
+    local size = fsize()
+    if not size then return end
+
+    if not checked then detect() end
+
+    local dur_txt = "${duration}"
+    if est_mode and load_dur and load_size > 0 then
+        -- live estimate: duration scales with the file size
+        dur_txt = "~" .. hms(load_dur * size / load_size)
+    end
+    mp.set_property("options/term-status-msg",
+        string.format("${time-pos}/%s | V:${volume}%%\nLive file size: %.1f MB", dur_txt, size / 1048576))
+
+    local pos = mp.get_property_number("time-pos")
+    if not pos then return end
+    local dur = mp.get_property_number("duration")
+    local eof = mp.get_property_bool("eof-reached", false)
+
+    local near = eof or (not dur) or (dur - pos) < NEAR_END
+    if (size - last_size) >= MIN_GROWTH and near
+       and (mp.get_time() - last_reload) > COOLDOWN then
+        local paused = mp.get_property_bool("pause", false) and not eof
+        last_reload = mp.get_time()
+        mp.command_native({
+            name = "loadfile", url = path, flags = "replace",
+            options = string.format("start=%.2f,pause=%s", pos, paused and "yes" or "no"),
+        })
+    end
+end)
+EOF
+}
+
 _show_file_info() {
     local file="$1"
     local size_mb
@@ -79,7 +197,7 @@ _show_file_info() {
     session_dir=$(_session_dir "$file")
 
     echo -e "${C}____________________________________________________________${R}"
-    echo -e "${C}  MTP v1.2 | MEDIA TAIL PLAYER                            ${R}"
+    echo -e "${C}  MTP v1.3 | MEDIA TAIL PLAYER                            ${R}"
     echo -e "${C}____________________________________________________________${R}"
     echo -e "${Y}  9 / 0  : Volume down / up              ${R}"
     echo -e "${Y}  , / .  : Seek -10 / +10 sec            ${R}"
@@ -91,7 +209,7 @@ _show_file_info() {
     echo -e "${Y}  e      : EOF menu                      ${R}"
     echo -e "${C}____________________________________________________________${R}"
     if [[ "$file" == *.part ]]; then
-        echo -e "${Y}📥 Downloading (.part)${R}"
+        echo -e "${Y}📥 Downloading (.part) - auto-reload on${R}"
     else
         echo -e "${G}✅ Ready${R}"
     fi
@@ -156,14 +274,21 @@ _run_mpv() {
 
     local input_conf
     input_conf=$(mktemp)
-    trap "rm -f '$input_conf'" RETURN
+    local grow_lua
+    grow_lua=$(mktemp --suffix=.lua)
+    trap "rm -f '$input_conf' '$grow_lua'" RETURN
     _create_input_conf "$input_conf"
+    _create_grow_lua "$grow_lua"
 
     local size_at_start
     size_at_start=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
 
     local keep_open="no"
     [[ "$file" == *.part ]] && keep_open="yes"
+    # Also keep open for files still being written (e.g. TTS .wav, recording)
+    if [[ "$keep_open" == "no" && -n "$(find "$file" -mmin -1 2>/dev/null)" ]]; then
+        keep_open="yes"
+    fi
 
     # Read saved position from our own position.txt (works across .part -> .m4a switch)
     local start_param=""
@@ -186,6 +311,7 @@ _run_mpv() {
         --keep-open="$keep_open" \
         --no-input-default-bindings \
         --input-conf="$input_conf" \
+        --script="$grow_lua" \
         --demuxer-lavf-o=fflags=+nobuffer+fastseek \
         --demuxer-readahead-secs=1 \
         --cache=yes \
