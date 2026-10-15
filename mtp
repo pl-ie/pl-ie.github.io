@@ -82,7 +82,7 @@ _create_grow_lua() {
 local utils = require 'mp.utils'
 
 local INTERVAL   = 2        -- seconds between checks
-local MIN_GROWTH = 65536    -- bytes of new data needed to trigger reload
+local MIN_GROWTH = 262144   -- bytes of new data needed to trigger reload
 local NEAR_END   = 15       -- reload when less than this many seconds remain
 local COOLDOWN   = 3        -- minimum seconds between reloads
 
@@ -92,6 +92,7 @@ local last_reload = 0
 -- (growing WAV, raw recordings), so it goes stale while the file grows.
 -- Files with real duration in metadata (yt-dlp .part etc.) are left alone.
 local est_mode, load_size, load_dur, checked = false, 0, nil, false
+local last_pos = nil
 
 local function fsize()
     if not path then return nil end
@@ -144,6 +145,7 @@ mp.register_event("file-loaded", function()
     last_size = fsize() or 0
     last_reload = mp.get_time()
     checked = false
+    last_pos = nil
     detect()
 end)
 
@@ -174,11 +176,24 @@ mp.add_periodic_timer(INTERVAL, function()
     if not pos then return end
     local dur = mp.get_property_number("duration")
     local eof = mp.get_property_bool("eof-reached", false)
+    local user_paused = mp.get_property_bool("pause", false) and not eof
+    local starved = mp.get_property_bool("paused-for-cache", false)
+    -- stalled = position did not move since the last check and the user
+    -- did not pause (mpv ran out of the data it saw when the file was loaded)
+    local stalled = (last_pos ~= nil) and math.abs(pos - last_pos) < 0.01
+                    and not user_paused
+    last_pos = pos
 
-    local near = eof or (not dur) or (dur - pos) < NEAR_END
+    -- For files with metadata duration (yt-dlp .part) "duration - pos" is the
+    -- length of the whole video, so it can't tell where the DOWNLOADED data
+    -- ends: rely on EOF / cache starvation / stalled position instead.
+    -- For estimated durations (est_mode) the old near-end test still applies.
+    local near = eof or starved or stalled or (not dur)
+                 or (est_mode and (dur - pos) < NEAR_END)
     if (size - last_size) >= MIN_GROWTH and near
        and (mp.get_time() - last_reload) > COOLDOWN then
-        local paused = mp.get_property_bool("pause", false) and not eof
+        local paused = user_paused
+        mp.osd_message(string.format("Reload: +%.1f MB", (size - last_size) / 1048576), 2)
         last_reload = mp.get_time()
         mp.command_native({
             name = "loadfile", url = path, flags = "replace",
