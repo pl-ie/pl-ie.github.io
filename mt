@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MT - Media Terminal Player v1.1.0
+# MT - Media Terminal Player v1.3.2
 # A lightweight terminal media player with paginated file browser.
 # Plays local audio/video files using mpv with resume support.
 #
@@ -18,6 +18,7 @@
 #   a                - play all
 #   u                - refresh file list
 #   t                - time filter
+#   l                - sort by length: longest first / shortest first / off
 #   /                - search
 #   q                - clear filters / quit
 
@@ -28,7 +29,7 @@ G='\033[1;32m'
 Y='\033[1;33m'
 C='\033[1;36m'
 R='\033[0m'
-# Kolory dla argumentów mpv (prawdziwy znak ESC)
+# Colors for mpv arguments (real ESC character)
 _MC=$'\033[1;36m'
 _MR=$'\033[0m'
 
@@ -38,6 +39,7 @@ mkdir -p "$WATCH_LATER_BASE/session"
 
 PLAYLIST_FILE="$HOME/.mt_current_playlist.m3u"
 DURATION_CACHE=$(mktemp)
+DUR_DB=$(mktemp)          # lines: "seconds<TAB>path"
 INPUT_CONF=$(mktemp)
 CURRENT_PAGE=0
 LAST_H=0
@@ -45,8 +47,14 @@ LAST_W=0
 FILTER=""
 TIME_FILTER=0
 TIME_FILTER_MODE=""
+SORT_MODE=""              # "" = by name, "desc" = longest first, "asc" = shortest first
+CALC_PID=""
+MAX_ROWS=10
+TERM_H=24
+TERM_W=80
+declare -A DUR
 
-trap "rm -f '$DURATION_CACHE' '$INPUT_CONF'" EXIT
+trap "[[ -n \"\$CALC_PID\" ]] && kill \"\$CALC_PID\" 2>/dev/null; rm -f '$DURATION_CACHE' '$DUR_DB' '$INPUT_CONF'" EXIT
 
 # === KEY BINDINGS ===
 _create_input_conf() {
@@ -71,9 +79,9 @@ ENTER playlist-next
 EOF
 }
 
-# === HELPER: czy aktywny jakikolwiek filtr ===
+# === HELPER: is any filter / sort active ===
 _filter_active() {
-    [[ -n "$FILTER" || $TIME_FILTER -gt 0 ]]
+    [[ -n "$FILTER" || $TIME_FILTER -gt 0 || -n "$SORT_MODE" ]]
 }
 
 # === WAIT FOR PART FILE ===
@@ -93,7 +101,45 @@ _wait_for_part() {
     fi
 }
 
-# === APPLY FILTER (text + time) → DISPLAY_FILES ===
+# === LOAD DURATIONS (DUR_DB → DUR[]) ===
+_load_durations() {
+    DUR=()
+    local d p
+    while IFS=$'\t' read -r d p; do
+        [[ -n "$p" ]] && DUR["$p"]="$d"
+    done < "$DUR_DB"
+}
+
+# === WAIT UNTIL BACKGROUND DURATION SCAN FINISHES ===
+_wait_durations() {
+    local need=${#ALL_FILES[@]} have
+    while :; do
+        have=$(wc -l < "$DUR_DB"); have=${have// /}
+        (( have >= need )) && break
+        [[ -n "$CALC_PID" ]] && ! kill -0 "$CALC_PID" 2>/dev/null && break
+        printf "\r${C}Reading durations: %d/%d${R}" "$have" "$need"
+        sleep 0.3
+    done
+    printf "\r\033[K"
+}
+
+# === SORT DISPLAY_FILES BY LENGTH ===
+_sort_display() {
+    [[ -z "$SORT_MODE" ]] && return
+    (( ${#DISPLAY_FILES[@]} < 2 )) && return
+    _wait_durations
+    _load_durations
+    local key="-k1,1rn"
+    [[ "$SORT_MODE" == "asc" ]] && key="-k1,1n"
+    local f
+    mapfile -t DISPLAY_FILES < <(
+        for f in "${DISPLAY_FILES[@]}"; do
+            printf '%s\t%s\n' "${DUR[$f]:-0}" "$f"
+        done | sort -s -t$'\t' $key | cut -f2-
+    )
+}
+
+# === APPLY FILTER (text + time + sort) → DISPLAY_FILES ===
 _apply_filter() {
     local tmp_files=()
 
@@ -134,6 +180,7 @@ _apply_filter() {
         DISPLAY_FILES=("${tmp_files[@]}")
     fi
 
+    _sort_display
     CURRENT_PAGE=0
 }
 
@@ -149,20 +196,25 @@ _rescan_files() {
     )
 }
 
-# === BACKGROUND DURATION CALC ===
+# === BACKGROUND DURATION CALC (total + per-file DB) ===
 _calc_duration() {
+    [[ -n "$CALC_PID" ]] && kill "$CALC_PID" 2>/dev/null
+    : > "$DURATION_CACHE"
+    : > "$DUR_DB"
     (
-        local total=0 count=0
+        local total=0 count=0 f d dur
         local total_files=${#ALL_FILES[@]}
         for f in "${ALL_FILES[@]}"; do
-            [[ "$f" == *.part ]] && { count=$((count+1)); continue; }
-            local dur
-            dur=$(ffprobe -v quiet \
-                -show_entries format=duration \
-                -of default=noprint_wrappers=1:nokey=1 \
-                "$f" 2>/dev/null)
-            [[ "$dur" =~ ^[0-9]+ ]] && \
-                total=$(awk "BEGIN{printf \"%d\", $total + $dur}")
+            dur=0
+            if [[ "$f" != *.part ]]; then
+                d=$(ffprobe -v quiet \
+                    -show_entries format=duration \
+                    -of default=noprint_wrappers=1:nokey=1 \
+                    "$f" 2>/dev/null)
+                [[ "$d" =~ ^[0-9]+ ]] && dur=$(awk "BEGIN{printf \"%d\", $d}")
+            fi
+            total=$(( total + dur ))
+            printf '%s\t%s\n' "$dur" "$f" >> "$DUR_DB"
             count=$((count+1))
             if (( count % 5 == 0 || count == total_files )); then
                 printf "%02d:%02d:%02d (%d/%d)" \
@@ -171,19 +223,61 @@ _calc_duration() {
             fi
         done
     ) &
+    CALC_PID=$!
+}
+
+# === TERMINAL SIZE → TERM_H / TERM_W ===
+_term_size() {
+    local sz
+    sz=$(stty size 2>/dev/null </dev/tty)
+    if [[ "$sz" =~ ^([0-9]+)\ ([0-9]+)$ ]] && (( BASH_REMATCH[1] > 0 )); then
+        TERM_H=${BASH_REMATCH[1]}
+        TERM_W=${BASH_REMATCH[2]}
+    else
+        TERM_H=$(tput lines 2>/dev/null)
+        TERM_W=$(tput cols 2>/dev/null)
+    fi
+    [[ "$TERM_H" =~ ^[0-9]+$ ]] || TERM_H=24
+    [[ "$TERM_W" =~ ^[0-9]+$ ]] || TERM_W=80
+}
+
+# === TEXT OF ACTIVE FILTERS / SORT (no colors) ===
+_info_plain() {
+    local s=""
+    [[ -n "$FILTER" ]] && s="Filter: ${FILTER}"
+    (( TIME_FILTER > 0 )) && s+="${s:+ | }Time: ${TIME_FILTER_MODE}${TIME_FILTER}min (${#DISPLAY_FILES[@]} files)"
+    case "$SORT_MODE" in
+        desc) s+="${s:+ | }Sort: longest first" ;;
+        asc)  s+="${s:+ | }Sort: shortest first" ;;
+    esac
+    printf '%s' "$s"
+}
+
+# === LAYOUT: tracks per page (2 screen lines per track) ===
+_calc_layout() {
+    _term_size
+    local footer=5 info
+    if _filter_active; then
+        info=$(_info_plain)
+        footer=$(( 4 + ( ${#info} + TERM_W - 1 ) / TERM_W ))
+    fi
+    footer=$(( footer + 1 ))   # spare line for wrapping
+    MAX_ROWS=$(( (TERM_H - footer) / 2 ))
+    (( MAX_ROWS < 1 )) && MAX_ROWS=1
 }
 
 # === DRAW BROWSER ===
 _draw_browser() {
-    local term_h term_w
-    term_h=$(tput lines)
-    term_w=$(tput cols)
+    _calc_layout
+    local term_h=$TERM_H term_w=$TERM_W max_rows=$MAX_ROWS
     if [[ "$term_h" != "$LAST_H" || "$term_w" != "$LAST_W" ]]; then
         clear; LAST_H=$term_h; LAST_W=$term_w
     fi
 
-    local max_rows=$(( term_h - 3 ))
-    (( max_rows < 1 )) && max_rows=1
+    # line 1: "NNN) 276m " (11 chars) + start of the name
+    # line 2: 6-char indent + rest of the name
+    local w1=$(( term_w - 12 )); (( w1 < 8 )) && w1=8
+    local w2=$(( term_w - 7 ));  (( w2 < 8 )) && w2=8
 
     local total_files=${#DISPLAY_FILES[@]}
     local total_pages=$(( (total_files + max_rows - 1) / max_rows ))
@@ -195,8 +289,11 @@ _draw_browser() {
     dur_val=$(cat "$DURATION_CACHE" 2>/dev/null)
     [[ -z "$dur_val" ]] && dur_val="Calculating..."
 
+    _load_durations
+
     printf "\033[H\033[J"
 
+    local i
     for (( i = 0; i < max_rows; i++ )); do
         local idx=$(( start_idx + i ))
         (( idx >= total_files )) && break
@@ -214,26 +311,26 @@ _draw_browser() {
             done
         fi
 
-        local name
-        name=$(basename "$file_path" | cut -c1-56)
-        printf "${G}%3d)${R} %s\n" "$display_num" "$name"
+        local secs="${DUR[$file_path]}" dtxt="--"
+        if [[ -n "$secs" ]] && (( secs > 0 )); then
+            local mins=$(( (secs + 30) / 60 ))
+            if (( mins == 0 )); then dtxt="<1m"; else dtxt="${mins}m"; fi
+        fi
+
+        local name="${file_path##*/}"
+        printf "${G}%3d)${R} ${C}%5s${R} %s\n" "$display_num" "$dtxt" "${name:0:w1}"
+        printf "      %s\n" "${name:w1:w2}"
     done
 
-    local footer_info=""
-    [[ -n "$FILTER" ]] && footer_info=" | ${C}Filter: ${FILTER}${R}"
-    (( TIME_FILTER > 0 )) && \
-        footer_info+=" | ${C}Time: ${TIME_FILTER_MODE}${TIME_FILTER}min (${#DISPLAY_FILES[@]} files)${R}"
-
     if _filter_active; then
-        local filter_info=""
-        [[ -n "$FILTER" ]] && filter_info="${C}Filter: ${FILTER}${R}"
-        (( TIME_FILTER > 0 )) && filter_info+="${filter_info:+ | }${C}Time: ${TIME_FILTER_MODE}${TIME_FILTER}min (${#DISPLAY_FILES[@]} files)${R}"
-        echo -e "${Y}a: play all${R} | ${Y}PgUp/PgDn${R}"
+        local filter_info
+        filter_info="${C}$(_info_plain)${R}"
+        echo -e "${Y}a: all${R} | ${Y}l: sort${R} | ${Y}PgUp/PgDn${R}"
         echo -e "${Y}u: refresh${R}  | ${Y}t: time filter${R}"
         echo -e "${Y}/: search${R}   | ${Y}q: clear filters${R}"
-        [[ -n "$filter_info" ]] && echo -e "$filter_info"
+        echo -e "$filter_info"
     else
-        echo -e "${Y}a: play all${R} | ${Y}PgUp/PgDn${R}"
+        echo -e "${Y}a: all${R} | ${Y}l: sort${R} | ${Y}PgUp/PgDn${R}"
         echo -e "${Y}u: refresh${R}  | ${Y}t: time filter${R}"
         echo -e "${Y}/: search${R}   | ${Y}q: quit${R}"
         echo -e "${C}Total: ${dur_val}${R}"
@@ -318,12 +415,10 @@ _play_with_refresh() {
             local current_file="${ALL_FILES[$all_start_idx]}"
 
             _rescan_files
+            _calc_duration
             _apply_filter
 
             echo -e "${G}Found ${#ALL_FILES[@]} files (${#DISPLAY_FILES[@]} after filter)${R}"
-
-            true > "$DURATION_CACHE"
-            _calc_duration
 
             local new_idx=0
             for i in "${!ALL_FILES[@]}"; do
@@ -356,7 +451,7 @@ _play_with_refresh() {
                     done
                     all_start_idx=$new_all_idx
                 else
-                    echo -e "${Y}❌ Brak tracku: $goto_num${R}"; sleep 1
+                    echo -e "${Y}❌ No such track: $goto_num${R}"; sleep 1
                 fi
             fi
             continue
@@ -387,9 +482,20 @@ _handle_search() {
     _draw_browser
 }
 
+_handle_sort() {
+    case "$SORT_MODE" in
+        "")   SORT_MODE="desc" ;;
+        desc) SORT_MODE="asc" ;;
+        *)    SORT_MODE="" ;;
+    esac
+    _apply_filter
+    LAST_H=0
+    _draw_browser
+}
+
 _page_down() {
-    local m_rows=$(( $(tput lines) - 3 ))
-    (( (CURRENT_PAGE+1) * m_rows < ${#DISPLAY_FILES[@]} )) && (( CURRENT_PAGE++ ))
+    _calc_layout
+    (( (CURRENT_PAGE+1) * MAX_ROWS < ${#DISPLAY_FILES[@]} )) && (( CURRENT_PAGE++ ))
     _draw_browser
 }
 
@@ -470,9 +576,8 @@ _handle_time_filter() {
 
 _handle_refresh() {
     _rescan_files
-    _apply_filter
-    true > "$DURATION_CACHE"
     _calc_duration
+    _apply_filter
     LAST_H=0
     _draw_browser
 }
@@ -482,6 +587,7 @@ _handle_quit() {
         FILTER=""
         TIME_FILTER=0
         TIME_FILTER_MODE=""
+        SORT_MODE=""
         DISPLAY_FILES=("${ALL_FILES[@]}")
         CURRENT_PAGE=0
         LAST_H=0
@@ -554,8 +660,11 @@ while :; do
     elif [[ "$key" == "u" || "$key" == "U" ]]; then _handle_refresh
     elif [[ "$key" == "a" || "$key" == "A" ]]; then _handle_play_all
     elif [[ "$key" == "t" || "$key" == "T" ]]; then _handle_time_filter
+    elif [[ "$key" == "l" || "$key" == "L" ]]; then _handle_sort
     elif [[ "$key" == "/" ]];                   then _handle_search
     elif [[ "$key" == "q" || "$key" == "Q" ]]; then _handle_quit
     elif [[ "$key" =~ [0-9] ]];                then _handle_number "$key"
     fi
 done
+
+# === END OF FILE (mt v1.3.2) ===
