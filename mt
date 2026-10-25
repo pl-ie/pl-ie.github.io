@@ -8,9 +8,9 @@
 # Usage:
 #   mt               - open browser in current directory
 #   mt /path/to/dir  - open browser in specified directory
-#   mt kurs          - open browser with filter "kurs"
-#   mt *kurs*        - same with explicit wildcards
-#   mt kurs /path    - filter in specified directory
+#   mt course        - open browser with filter "course"
+#   mt *course*      - same with explicit wildcards
+#   mt course /path  - filter in specified directory
 #
 # Controls (browser):
 #   [number] + ENTER - play file by number
@@ -21,6 +21,9 @@
 #   l                - sort by length: longest first / shortest first / off
 #   /                - search
 #   q                - clear filters / quit
+#
+# Controls (playback):
+#   4 / 6            - volume down / up (one-handed use)
 
 termux-wake-lock 2>/dev/null || true
 
@@ -60,8 +63,8 @@ trap "[[ -n \"\$CALC_PID\" ]] && kill \"\$CALC_PID\" 2>/dev/null; rm -f '$DURATI
 _create_input_conf() {
     cat > "$INPUT_CONF" <<'EOF'
 SPACE cycle pause
-9 add volume -5
-0 add volume +5
+4 add volume -5
+6 add volume +5
 , seek -10 relative+keyframes
 . seek +10 relative+keyframes
 LEFT seek -20 relative+keyframes
@@ -342,7 +345,7 @@ _draw_browser() {
 _show_playback_header() {
     clear
     echo -e "${C}____________________________________________________________${R}"
-    echo -e "\n${Y}  9 / 0  : Volume down / up${R}"
+    echo -e "\n${Y}  4 / 6  : Volume down / up${R}"
     echo -e "\n${Y}  , / .  : Seek -10 / +10 sec${R}"
     echo -e "\n${Y}  ← / →  : Seek -20 / +20 sec${R}"
     echo -e "\n${Y}  ↑ / ↓  : Seek +120 / -120 sec${R}"

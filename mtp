@@ -3,6 +3,7 @@
 # Play .part files while downloading, recording or generating TTS
 # r = refresh (resume with more buffer)
 # q = quit (saves position)
+# 4 / 6 = volume down / up (one-handed use)
 # v1.3: auto-reload of growing .part files (detects size/duration change)
 
 G='\033[1;32m'
@@ -55,8 +56,8 @@ _create_input_conf() {
     local conf="$1"
     cat > "$conf" <<'EOF'
 SPACE cycle pause
-9 add volume -5
-0 add volume +5
+4 add volume -5
+6 add volume +5
 , seek -10 relative+keyframes
 . seek +10 relative+keyframes
 LEFT seek -20 relative+keyframes
@@ -214,7 +215,7 @@ _show_file_info() {
     echo -e "${C}____________________________________________________________${R}"
     echo -e "${C}  MTP v1.3 | MEDIA TAIL PLAYER                            ${R}"
     echo -e "${C}____________________________________________________________${R}"
-    echo -e "${Y}  9 / 0  : Volume down / up              ${R}"
+    echo -e "${Y}  4 / 6  : Volume down / up              ${R}"
     echo -e "${Y}  , / .  : Seek -10 / +10 sec            ${R}"
     echo -e "${Y}  ← / →  : Seek -20 / +20 sec            ${R}"
     echo -e "${Y}  ↑ / ↓  : Seek +120 / -120 sec          ${R}"

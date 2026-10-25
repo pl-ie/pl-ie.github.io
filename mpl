@@ -2,6 +2,7 @@
 # MPL PRO v3.2.0 - Media Playlist Player
 # Play local audio/video files with playlist management
 # Press 'u' during playback to refresh the playlist without losing your position
+# Press '4' / '6' during playback to lower / raise the volume (one-handed use)
 # Press 'd' in menu to toggle sort: newest-first <-> name (default)
 # Press 'o' in menu to toggle sort: oldest-first <-> name (default)
 #
@@ -162,8 +163,8 @@ _create_input_conf() {
     local conf="$1"
     cat > "$conf" <<'EOF'
 SPACE cycle pause
-9 add volume -5
-0 add volume +5
+4 add volume -5
+6 add volume +5
 , seek -10 relative+keyframes
 . seek +10 relative+keyframes
 LEFT seek -20 relative+keyframes
@@ -186,7 +187,7 @@ _show_header() {
     echo -e "${C}____________________________________________________________${R}"
     echo -e "${C}  MPL PRO v3.2.0 | OFFLINE PLAYER                          ${R}"
     echo -e "${C}____________________________________________________________${R}"
-    echo -e "${Y}  9 / 0  : Volume down / up              ${R}"
+    echo -e "${Y}  4 / 6  : Volume down / up              ${R}"
     echo -e "${Y}  , / .  : Seek -10 / +10 sec            ${R}"
     echo -e "${Y}  Left/Right : Seek -20 / +20 sec        ${R}"
     echo -e "${Y}  Up/Down    : Seek +120 / -120 sec      ${R}"
@@ -210,19 +211,11 @@ _get_saved_volume() {
 # when the original filename is too long), and read volume= from it.
 # Saves both in memory (LAST_VOLUME) and on disk (VOL_FILE).
 _save_volume_from_watch_later() {
-    local wl_file=""
-    local newest_time=0
-    local f mtime
-
-    for f in "$WATCH_LATER_BASE"/*; do
-        [[ -f "$f" ]] || continue
-        [[ "$(basename "$f")" == "volume.txt" ]] && continue
-        mtime=$(stat -c%Y "$f" 2>/dev/null || stat -f%m "$f" 2>/dev/null)
-        if [[ -n "$mtime" ]] && (( mtime > newest_time )); then
-            newest_time=$mtime
-            wl_file="$f"
-        fi
-    done
+    # Pick the newest file with a single find call. A per-file loop spawns
+    # several processes per file, which is very slow with hundreds of files.
+    local wl_file
+    wl_file=$(find "$WATCH_LATER_BASE" -maxdepth 1 -type f ! -name volume.txt \
+        -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
     [[ -z "$wl_file" ]] && return
 
     # Follow redirect entry (used when the original filename was too long)
