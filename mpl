@@ -141,23 +141,6 @@ _filter_active() {
     [[ -n "$FILTER" || $TIME_FILTER -gt 0 ]]
 }
 
-# Wait until a .part file reaches minimum buffered size before playing
-_wait_for_part() {
-    local file="$1"
-    [[ "$file" != *.part ]] && return 0
-
-    local size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
-    if [[ -z "$size" ]] || (( size < 1048576 )); then
-        echo -e "${Y}Buffering .part file...${R}"
-        while [[ -z "$size" ]] || (( size < 1048576 )); do
-            sleep 1
-            size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
-            printf "\r${M}Downloaded: $((size/1024)) KB${R}"
-        done
-        echo -e "\n${G}Ready - starting playback${R}"
-    fi
-}
-
 # Write mpv key bindings to a temp input config
 _create_input_conf() {
     local conf="$1"
@@ -236,9 +219,6 @@ _save_volume_from_watch_later() {
 # Launch mpv with the current PLAYLIST_FILE starting at given index
 _run_mpv() {
     local start_idx="${1:-0}"
-
-    local first_file=$(sed -n "$((start_idx+1))p" "$PLAYLIST_FILE")
-    [[ -n "$first_file" ]] && _wait_for_part "$first_file"
 
     local input_conf=$(mktemp)
     trap "rm -f '$input_conf'" RETURN
