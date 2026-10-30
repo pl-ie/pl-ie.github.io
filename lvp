@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# LVP - List Viewer Player v1.2
+# LVP - List Viewer Player v1.3
 # Auto-scrolling viewer of media files, ONE track per page, with track length.
 # Made for a tiny split-screen window (6 lines).
 # Pressing "f" (fav) adds the CURRENT track to a playlist named after the current
@@ -10,8 +10,15 @@
 # Requirements: ffprobe (ffmpeg)
 #
 # Usage:
-#   lvp               - current directory
-#   lvp /path/to/dir  - specified directory
+#   lvp                       - current directory
+#   lvp /path/to/dir          - specified directory
+#   lvp -p "phrase"           - only files whose name contains the phrase
+#                               (case-insensitive), e.g. lvp -p book
+#   lvp -p "phrase" /path     - same, in the specified directory
+#   lvp -p "" ...             - empty phrase = all files
+# Options:
+#   -p PHRASE   phrase to look for in the file name (case-insensitive)
+#   -h          show this help
 #
 # Controls:
 #   f            - add current track to playlist <dirname>.m3u8 (fav)
@@ -58,6 +65,8 @@ INFO=0                    # 1 = show tag info instead of the name layout
 CENTER=1                  # 1 = center the block vertically (default; "c" toggles)
 TOP=1                     # screen row of the counter line (1 unless centered)
 ORIG_STTY=""              # terminal settings saved before CTRL+Z is taken over
+PHRASE=""                 # -p: only files whose name contains this (case-insensitive)
+ALL_COUNT=0               # number of media files before the phrase filter
 T_TITLE=""; T_ARTIST=""; T_ALBUM=""; T_YEAR=""; T_CODEC=""; T_BR=""
 declare -A DUR
 
@@ -145,6 +154,16 @@ _rescan_files() {
             -iname "*.part" \
         \) 2>/dev/null | sort -V
     )
+    ALL_COUNT=${#ALL_FILES[@]}
+    # -p PHRASE: keep only files whose name contains the phrase (literal match)
+    if [[ -n "$PHRASE" ]]; then
+        local kept=() f base lc_phrase="${PHRASE,,}"
+        for f in "${ALL_FILES[@]}"; do
+            base="${f##*/}"
+            [[ "${base,,}" == *"$lc_phrase"* ]] && kept+=("$f")
+        done
+        ALL_FILES=("${kept[@]}")
+    fi
 }
 
 # === BACKGROUND DURATION CALC ===
@@ -414,7 +433,7 @@ _refresh() {
     _rescan_files
     if (( ${#ALL_FILES[@]} == 0 )); then
         clear
-        echo -e "${Y}No media files found in: $FULL_DIR${R}"
+        echo -e "${Y}No media files${PHRASE:+ matching \"$PHRASE\"} found in: $FULL_DIR${R}"
         exit 1
     fi
     _calc_duration
@@ -423,6 +442,31 @@ _refresh() {
 # =============================================================
 # === STARTUP ===
 # =============================================================
+
+_usage() {
+    cat <<'USAGE'
+Usage: lvp [-p "phrase"] [DIR]
+
+  -p PHRASE   only files whose name contains the phrase (case-insensitive)
+  -h          show this help
+
+Examples:
+  lvp                  current directory
+  lvp /path/to/dir     specified directory
+  lvp -p book          only files with "book" in the name
+  lvp -p book /path    same, in the specified directory
+USAGE
+}
+
+while getopts ":p:h" opt; do
+    case "$opt" in
+        p) PHRASE="$OPTARG" ;;
+        h) _usage; exit 0 ;;
+        :) echo -e "${Y}Error: option -$OPTARG requires an argument${R}"; exit 1 ;;
+        \?) echo -e "${Y}Error: unknown option -$OPTARG${R}"; _usage; exit 1 ;;
+    esac
+done
+shift $((OPTIND - 1))
 
 DIR="${1:-.}"
 if [[ ! -d "$DIR" ]]; then
@@ -438,7 +482,7 @@ PLAYLIST="$FULL_DIR/${PL_NAME}.m3u8"
 
 _rescan_files
 if (( ${#ALL_FILES[@]} == 0 )); then
-    echo -e "${Y}No media files found in: $FULL_DIR${R}"
+    echo -e "${Y}No media files${PHRASE:+ matching \"$PHRASE\"} found in: $FULL_DIR${R}"
     exit 1
 fi
 
@@ -449,7 +493,7 @@ _hl() { printf "${Y}  %-6s: %s${R}\n" "$1" "${2:0:TERM_W-10}"; }
 
 clear
 _sep
-echo -e "${C}  LVP | LIST VIEWER PLAYER${R}"
+echo -e "${C}LVP v1.3 | LIST VIEWER PLAYER${R}"
 _sep
 _hl "f"     "Add to ${PL_NAME}.m3u8"
 _hl "p"     "Play track in mpv"
@@ -465,7 +509,12 @@ _hl "HOME"  "First track"
 _hl "q"     "Quit (0)"
 _hl "CTRL+Z" "Suspend (fg = back)"
 _sep
-echo -e "${G}📂 Files:${R} ${#ALL_FILES[@]}"
+[[ -n "$PHRASE" ]] && echo -e "${G}Phrase:${R} ${Y}${PHRASE}${R}"
+if [[ -n "$PHRASE" ]]; then
+    echo -e "${G}📂 Files:${R} ${#ALL_FILES[@]} (of ${ALL_COUNT})"
+else
+    echo -e "${G}📂 Files:${R} ${#ALL_FILES[@]}"
+fi
 _ask_interval
 
 _calc_duration
