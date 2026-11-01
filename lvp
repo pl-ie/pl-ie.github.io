@@ -412,7 +412,7 @@ _view_playlist() {
             fi
             # footer on the last row (no trailing newline: would scroll the window)
             printf '\033[%d;1H' "$TERM_H"
-            printf "${Y}%d/%d${R} | ${G}n/b${R} | ${G}r${R} del | ${G}q${R} back" $(( page + 1 )) "$pages"
+            printf "${Y}%d/%d${R} | ${G}n/b${R} | ${G}r${R} remove | ${G}q${R} back" $(( page + 1 )) "$pages"
         fi
 
         if read -s -r -n 1 -t 1 key; then
