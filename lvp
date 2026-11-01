@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
-# LVP - List Viewer Player v1.3
+# LVP - List Viewer Player v1.6
 # Auto-scrolling viewer of media files, ONE track per page, with track length.
-# Made for a tiny split-screen window (6 lines).
-# Pressing "f" (fav) adds the CURRENT track to a playlist named after the current
-# directory (<dirname>.m3u8, UTF-8 M3U, created on the first press, saved in
-# that directory).
-# Based on mt / mtp (same colors, same file types).
+# Made for a tiny split-screen window (5-6 lines), also works in a full window.
+# Based on mt / mtp / mpl (same colors, same file types, same watch_later dir).
 #
-# Requirements: ffprobe (ffmpeg)
+# Requirements: bash 4+, ffprobe (ffmpeg); mpv for the "p" key
 #
 # Usage:
 #   lvp                       - current directory
@@ -21,23 +18,31 @@
 #   -h          show this help
 #
 # Controls:
-#   f            - add current track to playlist <dirname>.m3u8 (fav)
+#   f            - add the CURRENT track to <dirname>.m3u8 (fav playlist,
+#                  UTF-8 M3U, created on the first press, saved in the viewed
+#                  directory, no duplicates)
+#   v            - view the fav playlist as "N) title length" rows (n / b = page,
+#                  q = back to the list)
 #   p            - play the CURRENT track only in mpv (q = back to the list)
 #   SPACE or 5   - pause / resume auto-scroll
 #   b / n        - back / next track (manual scroll; also 4 / 6, PgUp / PgDn)
 #   g            - go to track number (type a number, ENTER)
 #   HOME         - jump to first track
 #   t            - add 2 sec to the scroll interval (max 59)
+#   s            - set scroll interval (1-59 sec)
 #   i            - toggle tag info (title, artist, album, codec) on / off
 #   c            - center mode on / off (default: on; block centered vertically)
-#   s            - set scroll interval (1-59 sec)
 #   2 or r       - refresh file list
 #   CTRL+Z       - suspend to the shell (screen is cleaned first, "fg" returns)
 #   0 or q       - quit
 #
 # Play the playlist later with:  mpv --no-video <dirname>.m3u8
 
+VERSION="1.6"
+
+# =============================================================
 # === COLORS (same as mt / mtp) ===
+# =============================================================
 G='\033[1;32m'
 Y='\033[1;33m'
 C='\033[1;36m'
@@ -47,54 +52,64 @@ R='\033[0m'
 _MC=$'\033[1;36m'
 _MR=$'\033[0m'
 
-# === CONFIG ===
+# =============================================================
+# === CONFIG / STATE ===
+# =============================================================
 WATCH_LATER_BASE="$HOME/.config/mpv/watch_later"   # same as mt, resume works in both
-DURATION_CACHE=$(mktemp)
-DUR_DB=$(mktemp)          # lines: "seconds<TAB>path"
-CALC_PID=""
-INTERVAL=7
-CURRENT=0                 # index of the track shown (1 track per page)
+DURATION_CACHE=$(mktemp)      # "HH:MM:SS (done/all)" written by the background scan
+DUR_DB=$(mktemp)              # lines: "seconds<TAB>path"
+CALC_PID=""                   # background duration scan
+INTERVAL=7                    # seconds between automatic page turns
+REMAIN=$INTERVAL              # seconds left until the next page
+CURRENT=0                     # index of the track shown (1 track per page)
+PAUSED=0
+INFO=0                        # 1 = show tag info instead of the file name
+CENTER=1                      # 1 = center the block vertically (default; "c" toggles)
+TOP=1                         # screen row of the counter line (1 unless centered)
 TERM_H=24
 TERM_W=80
-PAUSED=0
-LAST_H=0
+LAST_H=0                      # size at the last redraw (to detect a resize)
 LAST_W=0
-MSG=""
-MSG_TTL=0
-INFO=0                    # 1 = show tag info instead of the name layout
-CENTER=1                  # 1 = center the block vertically (default; "c" toggles)
-TOP=1                     # screen row of the counter line (1 unless centered)
-ORIG_STTY=""              # terminal settings saved before CTRL+Z is taken over
-PHRASE=""                 # -p: only files whose name contains this (case-insensitive)
-ALL_COUNT=0               # number of media files before the phrase filter
+MSG=""                        # short message shown after the counter ...
+MSG_TTL=0                     # ... for this many more seconds
+ORIG_STTY=""                  # terminal settings saved before CTRL+Z is taken over
+PHRASE=""                     # -p: only files whose name contains this
+ALL_COUNT=0                   # number of media files before the phrase filter
+NUM=""                        # result of _ask_number (empty = cancelled)
+ALL_FILES=()
 T_TITLE=""; T_ARTIST=""; T_ALBUM=""; T_YEAR=""; T_CODEC=""; T_BR=""
-declare -A DUR
+declare -A DUR                # path -> length in seconds
 
+# =============================================================
+# === EXIT AND SUSPEND ===
+# =============================================================
 _cleanup() {
     [[ -n "$CALC_PID" ]] && kill "$CALC_PID" 2>/dev/null
     rm -f "$DURATION_CACHE" "$DUR_DB"
-    printf '\033[?25h'    # show cursor again
+    printf '\033[?25h'                                   # show the cursor again
     [[ -n "$ORIG_STTY" ]] && stty "$ORIG_STTY" 2>/dev/null </dev/tty
 }
 trap _cleanup EXIT
 
-# === SUSPEND (CTRL+Z) ===
 # CTRL+Z is read as a plain key (see 'stty susp undef' before the main loop), so
 # the screen can be cleaned BEFORE the script stops. Otherwise the shell prints
 # "[1]+ Stopped" and its prompt on top of the half-drawn window, with the cursor
 # hidden, and the prompt only looks right after an extra ENTER.
 _suspend() {
-    printf '\033[?25h\033[H\033[J'                  # show cursor, clear window
+    printf '\033[?25h\033[H\033[J'                       # show cursor, clear window
     [[ -n "$ORIG_STTY" ]] && stty "$ORIG_STTY" 2>/dev/null </dev/tty
-    kill -TSTP 0                                    # stop the whole process group
+    kill -TSTP 0                                         # stop the whole process group
     # --- continued by "fg" ---
     stty susp undef 2>/dev/null </dev/tty
     printf '\033[?25l'
-    REMAIN=$INTERVAL
-    _draw_page
+    _redraw
 }
 
-# === FORMAT SECONDS -> H:MM:SS or M:SS ===
+# =============================================================
+# === SMALL HELPERS ===
+# =============================================================
+
+# seconds -> H:MM:SS or M:SS
 _fmt_time() {
     local t="$1"
     if (( t >= 3600 )); then
@@ -104,7 +119,7 @@ _fmt_time() {
     fi
 }
 
-# === FILE SIZE IN MB ===
+# file size in MB with one decimal
 _size_mb() {
     local s
     s=$(stat -c%s "$1" 2>/dev/null || stat -f%z "$1" 2>/dev/null)
@@ -112,24 +127,7 @@ _size_mb() {
     printf '%d.%d' $((s/1048576)) $(( (s%1048576)*10/1048576 ))
 }
 
-# === ASK FOR SCROLL INTERVAL (1-59) ===
-_ask_interval() {
-    local ans
-    while :; do
-        echo -ne "${G}Scroll interval in seconds (1-59) [${INTERVAL}]: ${R}"
-        read -r ans
-        ans=$(echo "$ans" | tr -cd '0-9')
-        [[ -z "$ans" ]] && return 0
-        ans=$((10#$ans))
-        if (( ans >= 1 && ans <= 59 )); then
-            INTERVAL=$ans
-            return 0
-        fi
-        echo -e "${Y}Please enter a number from 1 to 59${R}"
-    done
-}
-
-# === TERMINAL SIZE ===
+# window size -> TERM_H / TERM_W
 _term_size() {
     local sz
     sz=$(stty size 2>/dev/null </dev/tty)
@@ -144,7 +142,39 @@ _term_size() {
     [[ "$TERM_W" =~ ^[0-9]+$ ]] || TERM_W=80
 }
 
-# === SCAN DIRECTORY ===
+# Ask for a whole number in MIN..MAX. Empty input cancels.
+# Usage: _ask_number "Prompt text" MIN MAX DEFAULT   -> result in NUM ("" = cancelled)
+_ask_number() {
+    local prompt="$1" min="$2" max="$3" def="$4" ans
+    NUM=""
+    while :; do
+        echo -ne "${G}${prompt} (${min}-${max}) [${def}]: ${R}"
+        read -r ans
+        ans=$(echo "$ans" | tr -cd '0-9')
+        [[ -z "$ans" ]] && return 0
+        ans=$((10#${ans:0:6}))
+        if (( ans >= min && ans <= max )); then
+            NUM=$ans
+            return 0
+        fi
+        echo -e "${Y}Please enter a number from ${min} to ${max}${R}"
+    done
+}
+
+_ask_interval() {
+    _ask_number "Scroll interval in seconds" 1 59 "$INTERVAL"
+    [[ -n "$NUM" ]] && INTERVAL=$NUM
+}
+
+# prompts need a visible cursor and a clean screen
+_prompt_begin() { printf '\033[?25h\033[H\033[J'; }
+_prompt_end()   { printf '\033[?25l'; }
+
+# =============================================================
+# === FILE LIST, LENGTHS AND TAGS ===
+# =============================================================
+
+# scan the directory -> ALL_FILES (honours the -p phrase, so "r" keeps the filter)
 _rescan_files() {
     mapfile -t ALL_FILES < <(
         find "$FULL_DIR" -maxdepth 1 -type f \( \
@@ -166,7 +196,7 @@ _rescan_files() {
     fi
 }
 
-# === BACKGROUND DURATION CALC ===
+# background scan: length of every file + running total (never blocks the viewer)
 _calc_duration() {
     [[ -n "$CALC_PID" ]] && kill "$CALC_PID" 2>/dev/null
     : > "$DURATION_CACHE"
@@ -176,7 +206,7 @@ _calc_duration() {
         local total_files=${#ALL_FILES[@]}
         for f in "${ALL_FILES[@]}"; do
             dur=0
-            if [[ "$f" != *.part ]]; then
+            if [[ "$f" != *.part ]]; then              # .part = length unknown yet
                 d=$(ffprobe -v quiet \
                     -show_entries format=duration \
                     -of default=noprint_wrappers=1:nokey=1 \
@@ -194,6 +224,7 @@ _calc_duration() {
     CALC_PID=$!
 }
 
+# DUR_DB -> DUR[]
 _load_durations() {
     DUR=()
     local d p
@@ -202,7 +233,7 @@ _load_durations() {
     done < "$DUR_DB"
 }
 
-# === READ TAGS OF A FILE (ffprobe) -> T_* variables ===
+# tags of one file (ffprobe) -> T_* variables
 _read_tags() {
     local f="$1" line key val
     T_TITLE=""; T_ARTIST=""; T_ALBUM=""; T_YEAR=""; T_CODEC=""; T_BR=""
@@ -224,31 +255,174 @@ _read_tags() {
         -of default=noprint_wrappers=1 "$f" 2>/dev/null)
 }
 
-# === PLAYLIST: <dirname>.m3u8 in the viewed directory ===
+# =============================================================
+# === FAV PLAYLIST: <dirname>.m3u8 in the viewed directory ===
+# =============================================================
 _in_playlist() {
     [[ -f "$PLAYLIST" ]] && grep -Fxq -- "$1" "$PLAYLIST"
+}
+
+# number of tracks in the playlist (header line not counted)
+_playlist_count() {
+    grep -vc '^#' "$PLAYLIST" 2>/dev/null
 }
 
 # add the current track (no duplicates)
 _add_to_playlist() {
     local f="${ALL_FILES[$CURRENT]}" n
     if _in_playlist "$f"; then
-        n=$(grep -vc '^#' "$PLAYLIST" 2>/dev/null)
+        n=$(_playlist_count)
         MSG="already (${n:-0})"
     else
-        # M3U8 header on first write
-        [[ -f "$PLAYLIST" ]] || echo "#EXTM3U" > "$PLAYLIST"
+        [[ -f "$PLAYLIST" ]] || echo "#EXTM3U" > "$PLAYLIST"   # M3U8 header on first write
         echo "$f" >> "$PLAYLIST"
-        n=$(grep -vc '^#' "$PLAYLIST" 2>/dev/null)
+        n=$(_playlist_count)
         MSG="+ ${PL_NAME} (${n:-0})"
     fi
     MSG_TTL=3
 }
 
+# seconds -> short length like in mt: 45s, 15m, 1h05m
+_fmt_short() {
+    local t="$1"
+    if (( t >= 3600 )); then
+        printf '%dh%02dm' $((t/3600)) $(((t%3600)/60))
+    elif (( t >= 60 )); then
+        printf '%dm' $((t/60))
+    else
+        printf '%ds' "$t"
+    fi
+}
+
+# v: show the fav playlist as "N) title length" rows. Text uses the whole window
+#    width, the length (in cyan) sits at the very end of each entry. Paged to the
+#    window height - works in a 5-6 line window too.
+#    n / 6 / PgDn / Down = next page, b / 4 / PgUp / Up = previous page (wraps around)
+#    q / v / 0 / ENTER / ESC = back; ▶ = track shown in the viewer, ✗ = file is gone
+_view_playlist() {
+    local items=() line
+    if [[ -f "$PLAYLIST" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ -z "$line" || "$line" == "#"* ]] && continue    # skip header / comments
+            items+=("$line")
+        done < "$PLAYLIST"
+    fi
+
+    local n=${#items[@]} page=0 pages=1 relayout=1 redraw=1 lh=0 lw=0
+    local -a pstart=() nlines=() pre=() dtx=() nm=()
+    local -A pdur=()                       # lengths looked up on demand
+    local rows tw i idx k cnt used a b s e plen nlen dlen key e1 e2 e3 first last secs total ps tail
+    while :; do
+        _term_size
+        if (( relayout || TERM_H != lh || TERM_W != lw )); then
+            lh=$TERM_H; lw=$TERM_W; relayout=0; redraw=1
+            rows=$(( TERM_H - 2 )); (( rows < 1 )) && rows=1   # header + footer lines
+            tw=$(( TERM_W - 1 )); (( tw < 8 )) && tw=8         # last column stays free
+            _load_durations
+            pstart=(); nlines=(); used=0; total=0
+            for (( i = 0; i < n; i++ )); do
+                nm[i]="${items[i]##*/}"
+                pre[i]="$(( i + 1 ))) "
+                [[ "${items[i]}" == "${ALL_FILES[$CURRENT]}" ]] && pre[i]="▶${pre[i]}"
+                # length: scan result if known, else ask ffprobe once
+                secs="${DUR[${items[i]}]:-${pdur[${items[i]}]}}"
+                if [[ -z "$secs" && -f "${items[i]}" && "${items[i]}" != *.part ]] \
+                    && command -v ffprobe >/dev/null 2>&1; then
+                    secs=$(ffprobe -v quiet -show_entries format=duration \
+                        -of default=noprint_wrappers=1:nokey=1 "${items[i]}" 2>/dev/null)
+                    [[ "$secs" =~ ^[0-9]+ ]] && secs=${secs%%.*} || secs=0
+                    pdur["${items[i]}"]="$secs"
+                fi
+                if [[ ! -e "${items[i]}" ]]; then dtx[i]="✗"
+                elif [[ "${items[i]}" == *.part ]]; then dtx[i]="DL"
+                elif [[ -n "$secs" ]] && (( secs > 0 )); then
+                    dtx[i]=$(_fmt_short "$secs"); total=$(( total + secs ))
+                else dtx[i]="--"; fi
+                # greedy paging by screen lines (a wrapped entry takes several lines)
+                cnt=$(( (${#pre[i]} + ${#nm[i]} + 1 + ${#dtx[i]} + tw - 1) / tw ))
+                (( cnt < 1 )) && cnt=1
+                (( cnt > rows )) && cnt=$rows
+                nlines[i]=$cnt
+                if (( i == 0 || used + cnt > rows )); then
+                    pstart+=("$i"); used=0
+                fi
+                used=$(( used + cnt ))
+            done
+            pages=${#pstart[@]}; (( pages < 1 )) && pages=1
+        fi
+        (( page >= pages )) && page=0
+        (( page < 0 )) && page=$(( pages - 1 ))
+
+        if (( redraw )); then
+            redraw=0
+            printf '\033[H\033[J'
+            printf "${C}%s${R}\n" "★ ${PL_NAME:0:TERM_W-8} (${n})"
+            if (( n == 0 )); then
+                if [[ -f "$PLAYLIST" ]]; then
+                    printf "${Y}Playlist is empty${R}\n"
+                else
+                    printf "${Y}No playlist yet (f = add)${R}\n"
+                fi
+            else
+                first=${pstart[page]}
+                last=$(( page + 1 < pages ? pstart[page + 1] : n ))
+                for (( idx = first; idx < last; idx++ )); do
+                    plen=${#pre[idx]}; nlen=${#nm[idx]}; dlen=${#dtx[idx]}
+                    for (( k = 0; k < nlines[idx]; k++ )); do
+                        s=$(( k * tw )); e=$(( s + tw ))
+                        # row k covers entry characters [s, e): prefix | name | space | length
+                        if (( s < plen )); then
+                            b=$(( e < plen ? e : plen ))
+                            printf "${G}%s${R}" "${pre[idx]:s:b-s}"
+                        fi
+                        a=$(( s > plen ? s : plen )); b=$(( e < plen + nlen ? e : plen + nlen ))
+                        (( b > a )) && printf '%s' "${nm[idx]:a-plen:b-a}"
+                        # tail = separating space + length, drawn in cyan
+                        ps=$(( plen + nlen ))
+                        a=$(( s > ps ? s : ps )); b=$(( e < ps + 1 + dlen ? e : ps + 1 + dlen ))
+                        if (( b > a )); then
+                            tail=" ${dtx[idx]}"
+                            printf "${C}%s${R}" "${tail:a-ps:b-a}"
+                        fi
+                        printf '\n'
+                    done
+                done
+            fi
+            # footer on the last row (no trailing newline: would scroll the window)
+            printf '\033[%d;1H' "$TERM_H"
+            printf "${Y}%d/%d${R} | ${G}n/b${R} page | ${G}q${R} back" $(( page + 1 )) "$pages"
+        fi
+
+        if read -s -r -n 1 -t 1 key; then
+            case "$key" in
+                n|N|6) page=$(( page + 1 )); redraw=1 ;;
+                b|B|4) page=$(( page - 1 )); redraw=1 ;;
+                q|Q|0|v|V|"") return 0 ;;
+                $'\e')
+                    read -s -r -n 1 -t 0.05 e1
+                    [[ -z "$e1" ]] && return 0                 # lone ESC = back
+                    read -s -r -n 1 -t 0.05 e2
+                    read -s -r -n 1 -t 0.05 e3
+                    case "${e1}${e2}${e3}" in
+                        "[6~"|"[B"*) page=$(( page + 1 )); redraw=1 ;;
+                        "[5~"|"[A"*) page=$(( page - 1 )); redraw=1 ;;
+                    esac
+                    ;;
+            esac
+        fi
+    done
+}
+
+# =============================================================
 # === PLAY ONLY THE CURRENT TRACK IN MPV ===
+# =============================================================
 _play_current() {
     local f="${ALL_FILES[$CURRENT]}" conf
     [[ -f "$f" ]] || return 0
+    if ! command -v mpv >/dev/null 2>&1; then
+        MSG="mpv not found"; MSG_TTL=3
+        return 0
+    fi
     mkdir -p "$WATCH_LATER_BASE"
     conf=$(mktemp)
     cat > "$conf" <<'MPVCONF'
@@ -264,6 +438,7 @@ DOWN seek -120 relative+keyframes
 HOME seek 0 absolute
 q quit
 MPVCONF
+    # give CTRL+Z back to the terminal while mpv runs
     printf '\033[?25h\033[H\033[J'
     [[ -n "$ORIG_STTY" ]] && stty "$ORIG_STTY" 2>/dev/null </dev/tty
     mpv \
@@ -284,25 +459,26 @@ MPVCONF
     printf '\033[?25l'
 }
 
-# === FOOTER (last two lines, redrawn every second) ===
+# =============================================================
+# === DRAWING ===
+# =============================================================
+
+# counter + total (the first two lines of the block), redrawn every second
 _draw_footer() {
-    local total=${#ALL_FILES[@]} status msg=""
+    local total=${#ALL_FILES[@]} status msg="" dur_val
     if (( PAUSED )); then
         status="${Y}⏸ pause${R}"
     else
         status="${G}▶ ${REMAIN}/${INTERVAL}s${R}"
     fi
     (( MSG_TTL > 0 )) && msg=" | ${M}${MSG}${R}"
-    local dur_val
     dur_val=$(cat "$DURATION_CACHE" 2>/dev/null)
     [[ -z "$dur_val" ]] && dur_val="Calculating..."
-    # counter on the first line of the block, total on the second
     printf "\033[%d;1H\033[K${Y}%d/%d${R} | %b%b" \
         "$TOP" $((CURRENT + 1)) "$total" "$status" "$msg"
     printf "\033[%d;1H\033[K${G}Total: %s${R}" $((TOP + 1)) "$dur_val"
 }
 
-# === DRAW CURRENT TRACK ===
 # Block layout: counter, total, title lines, last line (length / size / playlist).
 #  - normal mode: the block fills the whole window, so the title gets every spare
 #    line (6-line window -> 3 title lines, 7 -> 4, ...)
@@ -355,7 +531,7 @@ _draw_page() {
 
     printf '\033[H\033[J'
     _draw_footer
-    printf '\033[%d;1H' $((TOP + 2))      # title starts below the two counter lines
+    printf '\033[%d;1H' $((TOP + 2))          # title starts below the two counter lines
 
     # title, cyan like in mtp
     for (( i = 0; i < trows; i++ )); do
@@ -370,65 +546,60 @@ _draw_page() {
         return
     fi
 
-    # last line of the block (no trailing newline):
-    # length | size | playlist mark. Must stay within ONE screen line, otherwise
-    # the terminal wraps it and scrolls the whole window.
-    local base_txt
+    # Last line of the block (no trailing newline): length | size | playlist mark.
+    # It must stay within ONE screen line, otherwise the terminal wraps it and
+    # scrolls the whole window.
+    local lead lead_col
     if [[ "$file_path" == *.part ]]; then
-        base_txt="⬇ DL | ${size_txt} MB"          # .part = still downloading
+        lead="⬇ DL"; lead_col="$Y"              # .part = still downloading
     else
-        base_txt="⏱ ${dtxt} | ${size_txt} MB"
+        lead="⏱ ${dtxt}"; lead_col="$C"
     fi
-    # the emoji icon can be 2 columns wide: the "+ 1" below makes room for that,
-    # and avail keeps 1 spare column at the right edge
+    local plain="${lead} | ${size_txt} MB"
     local pl_mark="" avail=$(( TERM_W - 1 ))
     if _in_playlist "$file_path"; then
-        pl_mark=" | ★ in m3u"
-        # too long for this window -> shorten the mark to a bare star
-        (( ${#base_txt} + 1 + ${#pl_mark} > avail )) && pl_mark=" | ★"
+        pl_mark="★ in m3u"
+        # the emoji icon can be 2 columns wide: the "+ 1" makes room for that, and
+        # avail keeps 1 spare column. Too long -> shorten the mark to a bare star.
+        (( ${#plain} + 1 + 3 + ${#pl_mark} > avail )) && pl_mark="★"
     fi
-    if [[ "$file_path" == *.part ]]; then
-        printf "${Y}⬇ DL${R} ${M}| %s MB${R}" "$size_txt"
-    else
-        printf "${C}⏱ %s${R} ${M}| %s MB${R}" "$dtxt" "$size_txt"
-    fi
-    [[ -n "$pl_mark" ]] && printf "${M} |${R} ${G}%s${R}" "${pl_mark# | }"
+    printf "${lead_col}%s${R} ${M}| %s MB${R}" "$lead" "$size_txt"
+    [[ -n "$pl_mark" ]] && printf "${M} |${R} ${G}%s${R}" "$pl_mark"
 }
 
-# === NAVIGATION (wraps around) ===
-_next() {
-    local total=${#ALL_FILES[@]}
-    CURRENT=$(( (CURRENT + 1) % total ))
-}
+# page turn / redraw helpers
+_redraw() { REMAIN=$INTERVAL; _draw_page; }
 
-_prev() {
-    local total=${#ALL_FILES[@]}
-    CURRENT=$(( (CURRENT - 1 + total) % total ))
-}
+# =============================================================
+# === NAVIGATION AND ACTIONS (wrap around) ===
+# =============================================================
+_next() { CURRENT=$(( (CURRENT + 1) % ${#ALL_FILES[@]} )); }
+_prev() { CURRENT=$(( (CURRENT - 1 + ${#ALL_FILES[@]}) % ${#ALL_FILES[@]} )); }
 
-# === GO TO TRACK NUMBER ===
-# Asks for a number (1..total), jumps there and keeps auto-scrolling from it.
-# Empty input cancels.
+# go to a track number; auto-scrolling continues from there
 _goto_track() {
-    local total=${#ALL_FILES[@]} ans
-    local CURRENT_NUM=$(( CURRENT + 1 ))
-    printf '\033[?25h\033[H\033[J'
-    while :; do
-        echo -ne "${G}Go to track (1-${total}) [${CURRENT_NUM}]: ${R}"
-        read -r ans
-        ans=$(echo "$ans" | tr -cd '0-9')
-        [[ -z "$ans" ]] && break
-        ans=$((10#$ans))
-        if (( ans >= 1 && ans <= total )); then
-            CURRENT=$(( ans - 1 ))
-            break
-        fi
-        echo -e "${Y}Please enter a number from 1 to ${total}${R}"
-    done
-    printf '\033[?25l'
+    local total=${#ALL_FILES[@]}
+    _prompt_begin
+    _ask_number "Go to track" 1 "$total" $(( CURRENT + 1 ))
+    [[ -n "$NUM" ]] && CURRENT=$(( NUM - 1 ))
+    _prompt_end
 }
 
-# === REFRESH LIST ===
+_set_interval() {
+    _prompt_begin
+    _ask_interval
+    _prompt_end
+}
+
+# t: add 2 seconds to the interval (max 59)
+_interval_plus() {
+    INTERVAL=$(( INTERVAL + 2 ))
+    (( INTERVAL > 59 )) && INTERVAL=59
+    MSG="interval ${INTERVAL}s"
+    MSG_TTL=3
+}
+
+# rescan the directory and restart the length scan
 _refresh() {
     _rescan_files
     if (( ${#ALL_FILES[@]} == 0 )); then
@@ -440,11 +611,48 @@ _refresh() {
 }
 
 # =============================================================
-# === STARTUP ===
+# === KEYS ===
 # =============================================================
 
+# escape sequences: PgUp / PgDn / arrows / HOME
+_handle_escape() {
+    local esc1 esc2 esc3
+    read -s -r -n 1 -t 0.05 esc1
+    read -s -r -n 1 -t 0.05 esc2
+    read -s -r -n 1 -t 0.05 esc3
+    case "${esc1}${esc2}${esc3}" in
+        "[5~"|"[A"*)       _prev; _redraw ;;
+        "[6~"|"[B"*)       _next; _redraw ;;
+        "[H"*|"OH"*|"[1~") CURRENT=0; _redraw ;;
+    esac
+}
+
+_handle_key() {
+    case "$1" in
+        " "|5)    PAUSED=$(( 1 - PAUSED )); REMAIN=$INTERVAL; _draw_footer ;;
+        4|b|B)    _prev; _redraw ;;
+        6|n|N)    _next; _redraw ;;
+        t|T)      _interval_plus; _draw_footer ;;
+        i|I)      INFO=$(( 1 - INFO )); _draw_page ;;
+        c|C)      CENTER=$(( 1 - CENTER )); _draw_page ;;
+        s|S)      _set_interval; _redraw ;;
+        2|r|R)    _refresh; _redraw ;;
+        p|P)      _play_current; _redraw ;;
+        g|G)      _goto_track; _redraw ;;
+        f|F)      _add_to_playlist; _redraw ;;
+        v|V)      _view_playlist; _redraw ;;
+        $'\x1a')  _suspend ;;
+        0|q|Q)    clear; exit 0 ;;
+    esac
+}
+
+# =============================================================
+# === STARTUP ===
+# =============================================================
 _usage() {
-    cat <<'USAGE'
+    cat <<USAGE
+LVP v${VERSION} - List Viewer Player
+
 Usage: lvp [-p "phrase"] [DIR]
 
   -p PHRASE   only files whose name contains the phrase (case-insensitive)
@@ -460,9 +668,9 @@ USAGE
 
 while getopts ":p:h" opt; do
     case "$opt" in
-        p) PHRASE="$OPTARG" ;;
-        h) _usage; exit 0 ;;
-        :) echo -e "${Y}Error: option -$OPTARG requires an argument${R}"; exit 1 ;;
+        p)  PHRASE="$OPTARG" ;;
+        h)  _usage; exit 0 ;;
+        :)  echo -e "${Y}Error: option -$OPTARG requires an argument${R}"; exit 1 ;;
         \?) echo -e "${Y}Error: unknown option -$OPTARG${R}"; _usage; exit 1 ;;
     esac
 done
@@ -475,7 +683,7 @@ if [[ ! -d "$DIR" ]]; then
 fi
 FULL_DIR=$(realpath "$DIR" 2>/dev/null || echo "$DIR")
 
-# playlist named after the current directory
+# fav playlist is named after the viewed directory
 PL_NAME=$(basename "$FULL_DIR" | tr ' ' '_')
 [[ -z "$PL_NAME" || "$PL_NAME" == "/" ]] && PL_NAME="root"
 PLAYLIST="$FULL_DIR/${PL_NAME}.m3u8"
@@ -486,31 +694,34 @@ if (( ${#ALL_FILES[@]} == 0 )); then
     exit 1
 fi
 
+# --- start screen: key help, fits any window width ---
 _term_size
 _sep() { printf "${C}%s${R}\n" "$(printf '%*s' $((TERM_W - 1)) '' | tr ' ' '_')"; }
 # one help line: key column + description cut to the window width
-_hl() { printf "${Y}  %-6s: %s${R}\n" "$1" "${2:0:TERM_W-10}"; }
+_hl()  { printf "${Y}  %-6s: %s${R}\n" "$1" "${2:0:TERM_W-10}"; }
 
 clear
 _sep
-echo -e "${C}LVP v1.3 | LIST VIEWER PLAYER${R}"
+echo -e "${C}LVP v${VERSION} | LIST VIEWER PLAYER${R}"
 _sep
-_hl "f"     "Add to ${PL_NAME}.m3u8"
-_hl "p"     "Play track in mpv"
-_hl "n / b" "Next / Back (6 / 4)"
-_hl "SPACE" "Pause / Resume (5)"
-_hl "t"     "+2 sec to interval"
-_hl "i"     "Tag info on / off"
-_hl "c"     "Center mode on / off"
-_hl "s"     "Set interval (1-59)"
-_hl "r"     "Refresh list (2)"
-_hl "g"     "Go to track number"
-_hl "HOME"  "First track"
-_hl "q"     "Quit (0)"
+_hl "f"      "Add to ${PL_NAME}.m3u8"
+_hl "v"      "View playlist"
+_hl "p"      "Play track in mpv"
+_hl "n / b"  "Next / Back (6 / 4)"
+_hl "SPACE"  "Pause / Resume (5)"
+_hl "t"      "+2 sec to interval"
+_hl "i"      "Tag info on / off"
+_hl "c"      "Center mode on / off"
+_hl "s"      "Set interval (1-59)"
+_hl "r"      "Refresh list (2)"
+_hl "g"      "Go to track number"
+_hl "HOME"   "First track"
+_hl "q"      "Quit (0)"
 _hl "CTRL+Z" "Suspend (fg = back)"
 _sep
-[[ -n "$PHRASE" ]] && echo -e "${G}Phrase:${R} ${Y}${PHRASE}${R}"
+command -v ffprobe >/dev/null 2>&1 || echo -e "${Y}No ffprobe: no lengths/tags${R}"
 if [[ -n "$PHRASE" ]]; then
+    echo -e "${G}Phrase:${R} ${Y}${PHRASE}${R}"
     echo -e "${G}📂 Files:${R} ${#ALL_FILES[@]} (of ${ALL_COUNT})"
 else
     echo -e "${G}📂 Files:${R} ${#ALL_FILES[@]}"
@@ -518,87 +729,20 @@ fi
 _ask_interval
 
 _calc_duration
-printf '\033[?25l'    # hide cursor
+printf '\033[?25l'                                       # hide the cursor
 ORIG_STTY=$(stty -g 2>/dev/null </dev/tty)
 [[ -n "$ORIG_STTY" ]] && stty susp undef 2>/dev/null </dev/tty   # CTRL+Z -> plain key
-REMAIN=$INTERVAL
-_draw_page
+_redraw
 
 # =============================================================
 # === MAIN LOOP (1 tick = 1 second) ===
 # =============================================================
-
 while :; do
     if read -s -r -n 1 -t 1 key; then
         if [[ "$key" == $'\e' ]]; then
-            read -s -r -n 1 -t 0.05 esc1
-            read -s -r -n 1 -t 0.05 esc2
-            read -s -r -n 1 -t 0.05 esc3
-            rest="${esc1}${esc2}${esc3}"
-            case "$rest" in
-                "[5~"|"[A"*) _prev; REMAIN=$INTERVAL; _draw_page ;;
-                "[6~"|"[B"*) _next; REMAIN=$INTERVAL; _draw_page ;;
-                "[H"*|"OH"*|"[1~") CURRENT=0; REMAIN=$INTERVAL; _draw_page ;;
-            esac
+            _handle_escape
         else
-            case "$key" in
-                " "|5)
-                    PAUSED=$(( 1 - PAUSED ))
-                    REMAIN=$INTERVAL
-                    _draw_footer
-                    ;;
-                4|b|B) _prev; REMAIN=$INTERVAL; _draw_page ;;
-                6|n|N) _next; REMAIN=$INTERVAL; _draw_page ;;
-                t|T)
-                    INTERVAL=$(( INTERVAL + 2 ))
-                    (( INTERVAL > 59 )) && INTERVAL=59
-                    MSG="interval ${INTERVAL}s"
-                    MSG_TTL=3
-                    _draw_footer
-                    ;;
-                i|I)
-                    INFO=$(( 1 - INFO ))
-                    _draw_page
-                    ;;
-                c|C)
-                    CENTER=$(( 1 - CENTER ))
-                    _draw_page
-                    ;;
-                s|S)
-                    printf '\033[?25h\033[H\033[J'
-                    _ask_interval
-                    printf '\033[?25l'
-                    REMAIN=$INTERVAL
-                    _draw_page
-                    ;;
-                2|r|R)
-                    _refresh
-                    REMAIN=$INTERVAL
-                    _draw_page
-                    ;;
-                0|q|Q)
-                    clear
-                    exit 0
-                    ;;
-                $'\x1a')
-                    _suspend
-                    ;;
-                p|P)
-                    _play_current
-                    REMAIN=$INTERVAL
-                    _draw_page
-                    ;;
-                g|G)
-                    _goto_track
-                    REMAIN=$INTERVAL
-                    _draw_page
-                    ;;
-                f|F)
-                    _add_to_playlist
-                    REMAIN=$INTERVAL
-                    _draw_page
-                    ;;
-            esac
+            _handle_key "$key"
         fi
     else
         # 1 second passed without a key
@@ -607,8 +751,7 @@ while :; do
             REMAIN=$(( REMAIN - 1 ))
             if (( REMAIN <= 0 )); then
                 _next
-                REMAIN=$INTERVAL
-                _draw_page
+                _redraw
             else
                 _draw_footer
             fi
