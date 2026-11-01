@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# LVP - List Viewer Player v1.6
+# LVP - List Viewer Player v1.7
 # Auto-scrolling viewer of media files, ONE track per page, with track length.
 # Made for a tiny split-screen window (5-6 lines), also works in a full window.
 # Based on mt / mtp / mpl (same colors, same file types, same watch_later dir).
@@ -22,7 +22,7 @@
 #                  UTF-8 M3U, created on the first press, saved in the viewed
 #                  directory, no duplicates)
 #   v            - view the fav playlist as "N) title length" rows (n / b = page,
-#                  q = back to the list)
+#                  r = remove an entry (asks for its number), q = back to the list)
 #   p            - play the CURRENT track only in mpv (q = back to the list)
 #   SPACE or 5   - pause / resume auto-scroll
 #   b / n        - back / next track (manual scroll; also 4 / 6, PgUp / PgDn)
@@ -32,13 +32,13 @@
 #   s            - set scroll interval (1-59 sec)
 #   i            - toggle tag info (title, artist, album, codec) on / off
 #   c            - center mode on / off (default: on; block centered vertically)
-#   2 or r       - refresh file list
+#   2 or u       - update (rescan) the file list
 #   CTRL+Z       - suspend to the shell (screen is cleaned first, "fg" returns)
 #   0 or q       - quit
 #
 # Play the playlist later with:  mpv --no-video <dirname>.m3u8
 
-VERSION="1.6"
+VERSION="1.7"
 
 # =============================================================
 # === COLORS (same as mt / mtp) ===
@@ -174,7 +174,7 @@ _prompt_end()   { printf '\033[?25l'; }
 # === FILE LIST, LENGTHS AND TAGS ===
 # =============================================================
 
-# scan the directory -> ALL_FILES (honours the -p phrase, so "r" keeps the filter)
+# scan the directory -> ALL_FILES (honours the -p phrase, so "u" keeps the filter)
 _rescan_files() {
     mapfile -t ALL_FILES < <(
         find "$FULL_DIR" -maxdepth 1 -type f \( \
@@ -282,6 +282,32 @@ _add_to_playlist() {
     MSG_TTL=3
 }
 
+# read the fav playlist entries (no header / comments / empty lines) -> PL_ITEMS
+_pl_read() {
+    local line
+    PL_ITEMS=()
+    [[ -f "$PLAYLIST" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" == "#"* ]] && continue
+        PL_ITEMS+=("$line")
+    done < "$PLAYLIST"
+}
+
+# remove entry number $1 (as numbered in the playlist view) from the playlist file
+_remove_from_playlist() {
+    local want="$1" cnt=0 line tmp
+    tmp=$(mktemp)
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ -n "$line" && "$line" != "#"* ]]; then
+            cnt=$(( cnt + 1 ))
+            (( cnt == want )) && continue
+        fi
+        printf '%s\n' "$line"
+    done < "$PLAYLIST" > "$tmp"
+    cat "$tmp" > "$PLAYLIST"
+    rm -f "$tmp"
+}
+
 # seconds -> short length like in mt: 45s, 15m, 1h05m
 _fmt_short() {
     local t="$1"
@@ -298,15 +324,11 @@ _fmt_short() {
 #    width, the length (in cyan) sits at the very end of each entry. Paged to the
 #    window height - works in a 5-6 line window too.
 #    n / 6 / PgDn / Down = next page, b / 4 / PgUp / Up = previous page (wraps around)
+#    r = remove an entry (asks for its number)
 #    q / v / 0 / ENTER / ESC = back; ▶ = track shown in the viewer, ✗ = file is gone
 _view_playlist() {
-    local items=() line
-    if [[ -f "$PLAYLIST" ]]; then
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            [[ -z "$line" || "$line" == "#"* ]] && continue    # skip header / comments
-            items+=("$line")
-        done < "$PLAYLIST"
-    fi
+    local items=()
+    _pl_read; items=("${PL_ITEMS[@]}")
 
     local n=${#items[@]} page=0 pages=1 relayout=1 redraw=1 lh=0 lw=0
     local -a pstart=() nlines=() pre=() dtx=() nm=()
@@ -390,13 +412,26 @@ _view_playlist() {
             fi
             # footer on the last row (no trailing newline: would scroll the window)
             printf '\033[%d;1H' "$TERM_H"
-            printf "${Y}%d/%d${R} | ${G}n/b${R} page | ${G}q${R} back" $(( page + 1 )) "$pages"
+            printf "${Y}%d/%d${R} | ${G}n/b${R} | ${G}r${R} del | ${G}q${R} back" $(( page + 1 )) "$pages"
         fi
 
         if read -s -r -n 1 -t 1 key; then
             case "$key" in
                 n|N|6) page=$(( page + 1 )); redraw=1 ;;
                 b|B|4) page=$(( page - 1 )); redraw=1 ;;
+                r|R)
+                    if (( n > 0 )); then
+                        _prompt_begin
+                        _ask_number "Remove nr" 1 "$n" "-"
+                        _prompt_end
+                        if [[ -n "$NUM" ]]; then
+                            _remove_from_playlist "$NUM"
+                            _pl_read; items=("${PL_ITEMS[@]}"); n=${#items[@]}
+                            MSG="- removed #${NUM}"; MSG_TTL=3
+                        fi
+                        relayout=1
+                    fi
+                    ;;
                 q|Q|0|v|V|"") return 0 ;;
                 $'\e')
                     read -s -r -n 1 -t 0.05 e1
@@ -636,7 +671,7 @@ _handle_key() {
         i|I)      INFO=$(( 1 - INFO )); _draw_page ;;
         c|C)      CENTER=$(( 1 - CENTER )); _draw_page ;;
         s|S)      _set_interval; _redraw ;;
-        2|r|R)    _refresh; _redraw ;;
+        2|u|U)    _refresh; _redraw ;;
         p|P)      _play_current; _redraw ;;
         g|G)      _goto_track; _redraw ;;
         f|F)      _add_to_playlist; _redraw ;;
@@ -713,7 +748,7 @@ _hl "t"      "+2 sec to interval"
 _hl "i"      "Tag info on / off"
 _hl "c"      "Center mode on / off"
 _hl "s"      "Set interval (1-59)"
-_hl "r"      "Refresh list (2)"
+_hl "u"      "Update list (2)"
 _hl "g"      "Go to track number"
 _hl "HOME"   "First track"
 _hl "q"      "Quit (0)"
