@@ -1,0 +1,332 @@
+#!/bin/bash
+# "demos" v3.6 - record one WAV sample per speaker of a Piper voice model.
+# Usage: demos <file.txt> -v <voice> [--speed 1.0] [--here]
+#        [--num [N]] [--from ID] [--batch [N]]
+# Output: ./sample_<current dir name>/ (or the current dir itself with --here)
+# Stop a running job from another terminal with: demos -k
+
+PIPER_ENV="$HOME/piper-env/bin/activate"
+MODELS_DIR="$HOME/voices-piper"
+START_DIR="$PWD"          # directory the script was started from
+HERE=0                    # 1 = write WAVs directly into START_DIR
+NUM=0                     # max number of samples to record (0 = all speakers)
+FROM=0                    # first speaker ID to record
+BATCH=0                   # >0 = split into consecutive batches of this size
+SPEED="1.0"
+VOICE_NAME="lr"
+PID_FILE="${TMPDIR:-/tmp}/demos.pid"   # PID of the running recording (used by -k)
+
+RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; CYAN='\e[36m'; NC='\e[0m'
+
+WAKELOCK_KIND=""   # "termux", "systemd" or empty when no lock is held
+INHIBIT_PID=""
+
+usage() {
+    echo -e "${YELLOW}Usage: demos <file.txt> -v <voice> [--speed 1.0] [--here]${NC}"
+    echo -e "${CYAN}Options:${NC}"
+    echo "  -v, --voice <name>   Voice model (alias or name fragment, e.g. lr, arctic)"
+    echo "  --speed <value>      Speech speed, positive number (default: 1.0)"
+    echo "  -num, --num [N]      Record at most N samples (default N: 100)"
+    echo "  --from <ID>          Start at speaker ID (default: 0)"
+    echo "  --batch [N]          Run automatically in consecutive batches of N samples"
+    echo "                       (default N: 100), each in its own batch_NNN subdirectory"
+    echo "  --here               Write WAVs directly into the current directory"
+    echo "                       (default: subdirectory sample_<current dir name>)"
+    echo "  -k, --kill           Stop a running recording started in another session"
+    echo "  -h, --help           Show this help"
+    echo -e "${GREEN}Records every speaker of the model into a separate WAV file.${NC}"
+    echo -e "${CYAN}Existing non-empty WAVs are skipped, so re-running resumes the job.${NC}"
+}
+
+enable_wakelock() {
+    if command -v termux-wake-lock &>/dev/null; then
+        termux-wake-lock && WAKELOCK_KIND="termux"
+        echo -e "${GREEN}🔒 Wake lock enabled (Termux)${NC}"
+    elif command -v systemd-inhibit &>/dev/null; then
+        systemd-inhibit --what=idle --who="demos script" \
+            --why="Voice recording in progress" --mode=block sleep infinity &
+        INHIBIT_PID=$!
+        WAKELOCK_KIND="systemd"
+        echo -e "${GREEN}🔒 Wake lock enabled (systemd-inhibit PID: $INHIBIT_PID)${NC}"
+    else
+        echo -e "${YELLOW}⚠️  Wake lock unavailable${NC}"
+    fi
+}
+
+disable_wakelock() {
+    case "$WAKELOCK_KIND" in
+        termux)
+            termux-wake-unlock
+            echo -e "${CYAN}🔓 Wake lock released (Termux)${NC}" ;;
+        systemd)
+            kill "$INHIBIT_PID" 2>/dev/null
+            echo -e "${CYAN}🔓 Wake lock released (systemd-inhibit)${NC}" ;;
+    esac
+    WAKELOCK_KIND=""   # makes the cleanup idempotent
+}
+
+# Stop a recording running in another shell/session
+kill_running() {
+    if [ ! -f "$PID_FILE" ]; then
+        echo -e "${YELLOW}ℹ️  No recording is running${NC}"
+        return 1
+    fi
+    local pid
+    pid=$(cat "$PID_FILE" 2>/dev/null)
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        echo -e "${YELLOW}ℹ️  No recording is running (removed stale PID file)${NC}"
+        rm -f "$PID_FILE"
+        return 1
+    fi
+    echo -e "${CYAN}🛑 Stopping recording (PID $pid)...${NC}"
+    kill -TERM "$pid" 2>/dev/null
+    # Give it up to 5 s to clean up, then force-kill
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.5
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null
+        echo -e "${YELLOW}⚠️  Process did not exit, forced kill${NC}"
+    fi
+    rm -f "$PID_FILE"
+    echo -e "${GREEN}✅ Recording stopped${NC}"
+    return 0
+}
+
+# Runs on every exit path (normal, error, signal-triggered exit)
+cleanup() {
+    disable_wakelock
+    # Remove the PID file only if it belongs to this process
+    [ "$(cat "$PID_FILE" 2>/dev/null)" = "$$" ] && rm -f "$PID_FILE"
+}
+
+# Runs only on Ctrl-C / TERM
+on_interrupt() {
+    echo -e "\n${RED}🛑 Recording interrupted...${NC}"
+    [ -n "$PIPER_PID" ] && kill "$PIPER_PID" 2>/dev/null
+    # Remove the partial file of the interrupted speaker
+    [ -n "$OUTPUT_FILE" ] && rm -f "$OUTPUT_FILE"
+    exit 130
+}
+
+trap cleanup EXIT
+trap on_interrupt INT TERM
+
+get_model_path() {
+    local name="$1"
+    case "$name" in
+        lr)     name="en_US-libritts_r-medium" ;;
+        arctic) name="en_US-arctic-medium" ;;
+    esac
+    local p="$MODELS_DIR/$name.onnx"
+    if [ -f "$p" ]; then
+        echo "$p"
+    elif [ -d "$MODELS_DIR" ]; then
+        find "$MODELS_DIR" -name "*$name*.onnx" | sort | head -n 1
+    fi
+}
+
+# ---------- argument parsing ----------
+case "$1" in
+    -k|--kill) kill_running; exit $? ;;
+    ""|-h|--help) usage; [ -z "$1" ] && exit 1 || exit 0 ;;
+esac
+
+INPUT_FILE="$1"; shift
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -v|--voice)
+            [ -z "$2" ] && { echo -e "${RED}❌ $1 requires a value${NC}"; exit 1; }
+            VOICE_NAME="$2"; shift 2 ;;
+        --speed)
+            [ -z "$2" ] && { echo -e "${RED}❌ $1 requires a value${NC}"; exit 1; }
+            SPEED="$2"; shift 2 ;;
+        --here) HERE=1; shift ;;
+        -num|--num)
+            if [[ "$2" =~ ^[0-9]+$ ]]; then NUM="$2"; shift 2; else NUM=100; shift; fi
+            [ "$NUM" -gt 0 ] || { echo -e "${RED}❌ --num must be greater than 0${NC}"; exit 1; } ;;
+        --batch)
+            if [[ "$2" =~ ^[0-9]+$ ]]; then BATCH="$2"; shift 2; else BATCH=100; shift; fi
+            [ "$BATCH" -gt 0 ] || { echo -e "${RED}❌ --batch must be greater than 0${NC}"; exit 1; } ;;
+        --from)
+            [[ "$2" =~ ^[0-9]+$ ]] || { echo -e "${RED}❌ --from requires a speaker ID (number)${NC}"; exit 1; }
+            FROM="$2"; shift 2 ;;
+        -k|--kill) kill_running; exit $? ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo -e "${RED}❌ Unknown option: $1${NC}"; usage; exit 1 ;;
+    esac
+done
+
+if [ ! -f "$INPUT_FILE" ]; then
+    echo -e "${RED}❌ File not found: $INPUT_FILE${NC}"
+    exit 1
+fi
+
+# Speed must be a positive number with a dot as the decimal separator
+if ! [[ "$SPEED" =~ ^[0-9]+(\.[0-9]+)?$ ]] || \
+   [ "$(awk "BEGIN {print ($SPEED > 0)}")" != "1" ]; then
+    echo -e "${RED}❌ Invalid --speed value: $SPEED (use e.g. 1.2)${NC}"
+    exit 1
+fi
+
+# ---------- environment ----------
+if [ -f "$PIPER_ENV" ]; then
+    # shellcheck disable=SC1090
+    source "$PIPER_ENV"
+else
+    echo -e "${YELLOW}⚠️  Virtualenv not found: $PIPER_ENV (using system piper)${NC}"
+fi
+
+if ! command -v piper &>/dev/null; then
+    echo -e "${RED}❌ 'piper' command not found${NC}"
+    exit 1
+fi
+
+MODEL_PATH=$(get_model_path "$VOICE_NAME")
+if [ -z "$MODEL_PATH" ] || [ ! -f "$MODEL_PATH" ]; then
+    echo -e "${RED}❌ Voice model not found: $VOICE_NAME (looked in $MODELS_DIR)${NC}"
+    exit 1
+fi
+
+JSON_PATH="${MODEL_PATH}.json"
+
+# Number of speakers from the model config (defaults to 1)
+MAX_SPEAKERS=""
+if [ -f "$JSON_PATH" ]; then
+    MAX_SPEAKERS=$(grep -o '"num_speakers"[[:space:]]*:[[:space:]]*[0-9]*' "$JSON_PATH" \
+        | head -n 1 | grep -o '[0-9]*$')
+fi
+[ -z "$MAX_SPEAKERS" ] && MAX_SPEAKERS=1
+LIMIT=$((MAX_SPEAKERS - 1))
+
+# Range of speaker IDs to record
+START_ID=$FROM
+END_ID=$LIMIT
+if [ "$NUM" -gt 0 ] && [ $((START_ID + NUM - 1)) -lt "$END_ID" ]; then
+    END_ID=$((START_ID + NUM - 1))
+fi
+if [ "$START_ID" -gt "$LIMIT" ]; then
+    echo -e "${RED}❌ --from $FROM is out of range (model has speakers 0-$LIMIT)${NC}"
+    exit 1
+fi
+TOTAL=$((END_ID - START_ID + 1))
+
+LENGTH_SCALE=$(awk "BEGIN {print 1.0 / $SPEED}")
+
+# ---------- output directory ----------
+MODEL_NAME=$(basename "$MODEL_PATH" .onnx)
+DIR_NAME=$(basename "$START_DIR")
+[ "$DIR_NAME" = "/" ] && DIR_NAME="root"
+
+if [ "$HERE" -eq 1 ]; then
+    DEMO_DIR="$START_DIR"
+else
+    DEMO_DIR="$START_DIR/sample_${DIR_NAME}"
+fi
+
+if mkdir -p "$DEMO_DIR" 2>/dev/null && touch "$DEMO_DIR/.test" 2>/dev/null; then
+    rm -f "$DEMO_DIR/.test"
+else
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    DEMO_DIR="/tmp/voice-demos/sample_${DIR_NAME}_${TIMESTAMP}"
+    echo -e "${YELLOW}⚠️  No write access in $START_DIR, using $DEMO_DIR${NC}"
+    if ! mkdir -p "$DEMO_DIR" || ! touch "$DEMO_DIR/.test" 2>/dev/null; then
+        echo -e "${RED}❌ Cannot write to $DEMO_DIR${NC}"
+        exit 1
+    fi
+    rm -f "$DEMO_DIR/.test"
+fi
+echo -e "${GREEN}📁 Output directory: $DEMO_DIR${NC}"
+
+LOG_FILE="$DEMO_DIR/${MODEL_NAME}.log"
+
+# ---------- recording ----------
+# Refuse to start a second instance (use -k to stop the first one)
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+    echo -e "${RED}❌ A recording is already running (PID $(cat "$PID_FILE")). Use: demos -k${NC}"
+    exit 1
+fi
+echo $$ > "$PID_FILE"
+
+enable_wakelock
+
+echo -e "${CYAN}🚀 Starting: $MODEL_NAME${NC}"
+echo -e "${CYAN}📊 Speakers: $TOTAL (IDs $START_ID-$END_ID of $MAX_SPEAKERS)${NC}"
+[ "$BATCH" -gt 0 ] && echo -e "${CYAN}📦 Batch mode: $BATCH samples per batch${NC}"
+echo -e "${CYAN}📄 Source: $(basename "$INPUT_FILE")${NC}"
+echo -e "${YELLOW}⏱️  This may take a while...${NC}"
+echo "-------------------------------------------------------"
+
+SUCCESS_COUNT=0
+FAIL_COUNT=0
+SKIP_COUNT=0
+
+for ((i = START_ID; i <= END_ID; i++)); do
+    OFFSET=$((i - START_ID))
+
+    if [ "$BATCH" -gt 0 ]; then
+        OUT_DIR="$DEMO_DIR/batch_$(printf "%03d" $((OFFSET / BATCH + 1)))"
+        if [ $((OFFSET % BATCH)) -eq 0 ]; then
+            last=$((i + BATCH - 1)); [ "$last" -gt "$END_ID" ] && last=$END_ID
+            echo -e "${CYAN}📦 Batch $((OFFSET / BATCH + 1)): speakers $i-$last${NC}"
+        fi
+        mkdir -p "$OUT_DIR"
+    else
+        OUT_DIR="$DEMO_DIR"
+    fi
+
+    OUTPUT_FILE="$OUT_DIR/${MODEL_NAME}_speaker_$(printf "%03d" "$i").wav"
+
+    echo -ne "${YELLOW}🎙️  Speaker ${GREEN}$((OFFSET + 1))${YELLOW}/${GREEN}$TOTAL${YELLOW} (ID: ${CYAN}$i${YELLOW})... ${NC}"
+
+    # Resume support: keep what is already recorded
+    if [ -s "$OUTPUT_FILE" ]; then
+        echo -e "${CYAN}⏭️  exists, skipped${NC}"
+        SKIP_COUNT=$((SKIP_COUNT + 1))
+        continue
+    fi
+
+    # Pass --speaker only for multi-speaker models
+    SPEAKER_ARGS=()
+    [ "$MAX_SPEAKERS" -gt 1 ] && SPEAKER_ARGS=(--speaker "$i")
+
+    piper --model "$MODEL_PATH" \
+          --length_scale "$LENGTH_SCALE" \
+          "${SPEAKER_ARGS[@]}" \
+          --output_file "$OUTPUT_FILE" \
+          < "$INPUT_FILE" 2>>"$LOG_FILE" &
+    PIPER_PID=$!
+    wait "$PIPER_PID"
+    status=$?
+    PIPER_PID=""
+
+    if [ $status -eq 0 ] && [ -s "$OUTPUT_FILE" ]; then
+        echo -e "${GREEN}✅ OK ($(du -h "$OUTPUT_FILE" | cut -f1))${NC}"
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+        echo -e "${RED}❌ FAIL (exit $status, see $(basename "$LOG_FILE"))${NC}"
+        rm -f "$OUTPUT_FILE"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+done
+OUTPUT_FILE=""
+
+disable_wakelock
+
+echo "-------------------------------------------------------"
+echo -e "${GREEN}✅ Recording finished!${NC}"
+echo -e "${CYAN}📁 Location: $DEMO_DIR${NC}"
+echo -e "${GREEN}✅ Succeeded: $SUCCESS_COUNT${NC}"
+[ "$SKIP_COUNT" -gt 0 ] && echo -e "${CYAN}⏭️  Skipped (already existed): $SKIP_COUNT${NC}"
+if [ "$FAIL_COUNT" -gt 0 ]; then
+    echo -e "${RED}❌ Failed: $FAIL_COUNT (details: $LOG_FILE)${NC}"
+else
+    rm -f "$LOG_FILE"
+fi
+echo -e "${CYAN}📊 WAV files: $(find "$DEMO_DIR" -name "${MODEL_NAME}_speaker_*.wav" | wc -l)${NC}"
+echo -e "${CYAN}💾 Total size: $(find "$DEMO_DIR" -name "${MODEL_NAME}_speaker_*.wav" -exec du -ch {} + 2>/dev/null | tail -n 1 | cut -f1)${NC}"
+
+[ "$FAIL_COUNT" -gt 0 ] && exit 1
+exit 0
