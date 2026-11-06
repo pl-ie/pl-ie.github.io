@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# LVP - List Viewer Player v1.8
+# LVP - List Viewer Player v1.9
 # Auto-scrolling viewer of media files, ONE track per page, with track length.
 # Made for a tiny split-screen window (5-6 lines), also works in a full window.
 # Based on mt / mtp / mpl (same colors, same file types, same watch_later dir).
 #
+# v1.9: added "r" = -2 sec to the scroll interval.
 # v1.8: fixed SPACE (pause). "read" without IFS= swallows the space character,
 #       so the key arrived as an empty string and never matched " ".
 #
@@ -32,6 +33,7 @@
 #   g            - go to track number (type a number, ENTER)
 #   HOME         - jump to first track
 #   t            - add 2 sec to the scroll interval (max 59)
+#   r            - remove 2 sec from the scroll interval (min 1)
 #   s            - set scroll interval (1-59 sec)
 #   i            - toggle tag info (title, artist, album, codec) on / off
 #   c            - center mode on / off (default: on; block centered vertically)
@@ -41,7 +43,7 @@
 #
 # Play the playlist later with:  mpv --no-video <dirname>.m3u8
 
-VERSION="1.8"
+VERSION="1.9"
 
 # =============================================================
 # === COLORS (same as mt / mtp) ===
@@ -638,6 +640,15 @@ _interval_plus() {
     MSG_TTL=3
 }
 
+# r: remove 2 seconds from the interval (min 1)
+_interval_minus() {
+    INTERVAL=$(( INTERVAL - 2 ))
+    (( INTERVAL < 1 )) && INTERVAL=1
+    (( REMAIN > INTERVAL )) && REMAIN=$INTERVAL     # do not wait longer than the new interval
+    MSG="interval ${INTERVAL}s"
+    MSG_TTL=3
+}
+
 # rescan the directory and restart the length scan
 _refresh() {
     _rescan_files
@@ -672,6 +683,7 @@ _handle_key() {
         4|b|B)    _prev; _redraw ;;
         6|n|N)    _next; _redraw ;;
         t|T)      _interval_plus; _draw_footer ;;
+        r|R)      _interval_minus; _draw_footer ;;
         i|I)      INFO=$(( 1 - INFO )); _draw_page ;;
         c|C)      CENTER=$(( 1 - CENTER )); _draw_page ;;
         s|S)      _set_interval; _redraw ;;
@@ -749,6 +761,7 @@ _hl "p"      "Play track in mpv"
 _hl "n / b"  "Next / Back (6 / 4)"
 _hl "SPACE"  "Pause / Resume (5)"
 _hl "t"      "+2 sec to interval"
+_hl "r"      "-2 sec to interval"
 _hl "i"      "Tag info on / off"
 _hl "c"      "Center mode on / off"
 _hl "s"      "Set interval (1-59)"
