@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# LVP - List Viewer Player v1.7
+# LVP - List Viewer Player v1.8
 # Auto-scrolling viewer of media files, ONE track per page, with track length.
 # Made for a tiny split-screen window (5-6 lines), also works in a full window.
 # Based on mt / mtp / mpl (same colors, same file types, same watch_later dir).
+#
+# v1.8: fixed SPACE (pause). "read" without IFS= swallows the space character,
+#       so the key arrived as an empty string and never matched " ".
 #
 # Requirements: bash 4+, ffprobe (ffmpeg); mpv for the "p" key
 #
@@ -38,7 +41,7 @@
 #
 # Play the playlist later with:  mpv --no-video <dirname>.m3u8
 
-VERSION="1.7"
+VERSION="1.8"
 
 # =============================================================
 # === COLORS (same as mt / mtp) ===
@@ -415,7 +418,8 @@ _view_playlist() {
             printf "${Y}%d/%d${R} | ${G}n/b${R} | ${G}r${R} remove | ${G}q${R} back" $(( page + 1 )) "$pages"
         fi
 
-        if read -s -r -n 1 -t 1 key; then
+        # IFS= keeps a space as " " instead of an empty string (empty = ENTER here)
+        if IFS= read -s -r -n 1 -t 1 key; then
             case "$key" in
                 n|N|6) page=$(( page + 1 )); redraw=1 ;;
                 b|B|4) page=$(( page - 1 )); redraw=1 ;;
@@ -773,7 +777,8 @@ _redraw
 # === MAIN LOOP (1 tick = 1 second) ===
 # =============================================================
 while :; do
-    if read -s -r -n 1 -t 1 key; then
+    # IFS= is required: without it "read" strips the space and SPACE arrives as ""
+    if IFS= read -s -r -n 1 -t 1 key; then
         if [[ "$key" == $'\e' ]]; then
             _handle_escape
         else
