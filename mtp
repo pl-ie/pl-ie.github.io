@@ -170,8 +170,9 @@ mp.add_periodic_timer(INTERVAL, function()
         -- live estimate: duration scales with the file size
         dur_txt = "~" .. hms(load_dur * size / load_size)
     end
+    -- Track duration is printed in bold green (\27[1;32m = same as "Resuming from")
     mp.set_property("options/term-status-msg",
-        string.format("${time-pos}/%s | V:${volume}%%\nLive file size: %.1f MB", dur_txt, size / 1048576))
+        string.format("${time-pos}/\27[1;32m%s\27[0m | V:${volume}%%\nLive file size: %.1f MB", dur_txt, size / 1048576))
 
     local pos = mp.get_property_number("time-pos")
     if not pos then return end
@@ -321,7 +322,10 @@ _run_mpv() {
 
     local _MC=$'\033[1;36m'
     local _MR=$'\033[0m'
+    local _MG=$'\033[1;32m'   # bold green (same as "Resuming from") for the track duration
 
+    # Note: the Lua script (grow_lua) rewrites term-status-msg every 2 s with the
+    # live file size, so the duration color is set there too (see _create_grow_lua).
     mpv \
         --volume="$vol_param" \
         --keep-open="$keep_open" \
@@ -340,7 +344,7 @@ _run_mpv() {
         --save-position-on-quit \
         --watch-later-directory="$session_dir" \
         --title="MTP: $(basename "$file")" \
-        --term-status-msg='${time-pos}/${duration} | V:${volume}%' \
+        --term-status-msg="\${time-pos}/${_MG}\${duration}${_MR} | V:\${volume}%" \
         --term-playing-msg="${_MC}▶ \${filename}${_MR}" \
         $start_param \
         "$file"

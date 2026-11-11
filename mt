@@ -35,7 +35,7 @@ R='\033[0m'
 # Colors for mpv arguments (real ESC character)
 _MC=$'\033[1;36m'
 _MR=$'\033[0m'
-_SC=$'\033[1;38;5;43m'   # sea cyan (aquamarine) for duration and volume in status line
+_SC=$'\033[1;32m'   # bold bright green for track duration and the [n/total] field
 
 # === CONFIG ===
 WATCH_LATER_BASE="$HOME/.config/mpv/watch_later"
@@ -387,7 +387,7 @@ _run_mpv() {
     [[ -n "$first_file" ]] && _wait_for_part "$first_file"
 
     # Status line: the track counter [n/total] is already shown in the colored
-    # "playing" line, so it is not repeated here. Duration and volume are sea cyan.
+    # "playing" line, so it is not repeated here. Duration is bold green, V: is plain white.
     mpv \
         --no-video \
         --audio-display=no \
@@ -402,7 +402,7 @@ _run_mpv() {
         --watch-later-directory="$WATCH_LATER_BASE" \
         --watch-later-options-remove=pause \
         --input-conf="$INPUT_CONF" \
-        --term-status-msg="\${time-pos}/${_SC}\${duration}${_MR} | ${_SC}V:\${volume}%${_MR}" \
+        --term-status-msg="\${time-pos}/${_SC}\${duration}${_MR} | V:\${volume}%" \
         --term-playing-msg="${_MC}▶ ${_SC}[\${playlist-pos-1}/\${playlist-count}]${_MC} \${filename}${_MR}"
 
     return $?
