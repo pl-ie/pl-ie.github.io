@@ -3,6 +3,7 @@
 # Play local audio/video files with playlist management
 # Press 'u' during playback to refresh the playlist without losing your position
 # Press '4' / '6' during playback to lower / raise the volume (one-handed use)
+# Press 'f' during playback to add the current track to <dirname>.m3u8 (fav)
 # Press 'd' in menu to toggle sort: newest-first <-> name (default)
 # Press 'o' in menu to toggle sort: oldest-first <-> name (default)
 #
@@ -22,6 +23,7 @@ G='\033[1;32m'; Y='\033[1;33m'; C='\033[1;36m'; M='\033[1;35m'; R='\033[0m'
 # Colors for mpv arguments (real ESC character)
 _MC=$'\033[1;36m'
 _MR=$'\033[0m'
+_SC=$'\033[1;38;5;43m'   # sea cyan (aquamarine) for duration and volume in status line
 
 # === CONFIG ===
 WATCH_LATER_BASE="$HOME/.config/mpv/watch_later"
@@ -58,6 +60,12 @@ elif [[ -n "$1" ]]; then
 fi
 
 FULL_DIR=$(realpath "$DIR" 2>/dev/null || echo "$DIR")
+
+# Favourites playlist named after the viewed directory (same as list-viewer)
+PL_NAME=$(basename "$FULL_DIR" | tr ' ' '_')
+[[ -z "$PL_NAME" || "$PL_NAME" == "/" ]] && PL_NAME="root"
+FAV_PLAYLIST="$FULL_DIR/${PL_NAME}.m3u8"
+export FAV_PLAYLIST   # read by the helper script that mpv runs on "f"
 
 # === FUNCTIONS ===
 
@@ -163,6 +171,10 @@ g quit 43
 q quit
 ENTER playlist-next
 EOF
+    # f = add the current track to the favourites playlist (helper path in $2)
+    if [[ -n "$2" ]]; then
+        printf '%s\n' "f run \"sh\" \"$2\" \"\${path}\" ; show-text \"★ fav: \${filename}\" 2500" >> "$conf"
+    fi
 }
 
 # Print player header with key bindings
@@ -179,6 +191,7 @@ _show_header() {
     echo -e "${Y}  HOME   : Restart | q: Menu              ${R}"
     echo -e "${Y}  u: Refresh playlist                    ${R}"
     echo -e "${Y}  g: Go to track                         ${R}"
+    echo -e "${Y}  f: Fav -> ${PL_NAME}.m3u8${R}"
     echo -e "${C}____________________________________________________________${R}"
 }
 
@@ -221,8 +234,16 @@ _run_mpv() {
     local start_idx="${1:-0}"
 
     local input_conf=$(mktemp)
-    trap "rm -f '$input_conf'" RETURN
-    _create_input_conf "$input_conf"
+    local fav_helper=$(mktemp)
+    trap "rm -f '$input_conf' '$fav_helper'" RETURN
+    # helper run by mpv on "f": adds the given path to $FAV_PLAYLIST (no duplicates)
+    cat > "$fav_helper" <<'FAVEOF'
+f="$1"
+[ -n "$f" ] && [ -n "$FAV_PLAYLIST" ] || exit 0
+[ -f "$FAV_PLAYLIST" ] || echo "#EXTM3U" > "$FAV_PLAYLIST"
+grep -Fxq -- "$f" "$FAV_PLAYLIST" || echo "$f" >> "$FAV_PLAYLIST"
+FAVEOF
+    _create_input_conf "$input_conf" "$fav_helper"
 
     # Volume priority: on-disk VOL_FILE (survives full quit/restart) > in-memory LAST_VOLUME > 70 default
     local saved_vol
@@ -232,6 +253,8 @@ _run_mpv() {
     clear
     _show_header
 
+    # Status line: the track counter [n/total] is already shown in the colored
+    # "playing" line, so it is not repeated here. Duration and volume are sea cyan.
     mpv \
         --no-video \
         --audio-display=no \
@@ -246,8 +269,8 @@ _run_mpv() {
         --watch-later-directory="$WATCH_LATER_BASE" \
         --watch-later-options-remove=pause \
         --input-conf="$input_conf" \
-        --term-status-msg='[${playlist-pos-1}/${playlist-count}] ${time-pos}/${duration} | V:${volume}%' \
-        --term-playing-msg="${_MC}▶ [\${playlist-pos-1}/\${playlist-count}] \${filename}${_MR}"
+        --term-status-msg="\${time-pos}/${_SC}\${duration}${_MR} | ${_SC}V:\${volume}%${_MR}" \
+        --term-playing-msg="${_MC}▶ ${_SC}[\${playlist-pos-1}/\${playlist-count}]${_MC} \${filename}${_MR}"
 
     local exit_code=$?
     _save_volume_from_watch_later
