@@ -4,6 +4,8 @@
 # Press 'u' during playback to refresh the playlist without losing your position
 # Press '4' / '6' during playback to lower / raise the volume (one-handed use)
 # Press 'f' during playback to add the current track to <dirname>.m3u8 (fav)
+# Press 'p' during playback in sample mode (-s) to leave sample mode and play
+#   the current track in full (normal mode, playlist continues from there)
 # Press 'n' in menu to toggle sort: newest-first <-> name (default)
 # Press 'o' in menu to toggle sort: oldest-first <-> name (default)
 #
@@ -34,7 +36,9 @@ mkdir -p "$WATCH_LATER_BASE"
 VOL_FILE="$WATCH_LATER_BASE/volume.txt"
 
 PLAYLIST_FILE=$(mktemp)
-trap "rm -f '$PLAYLIST_FILE'" EXIT
+PLAY_REQ=$(mktemp)   # path of the track that "p" asked to play in full
+export PLAY_REQ
+trap "rm -f '$PLAYLIST_FILE' '$PLAY_REQ'" EXIT
 
 # === STATE ===
 MODE="menu"
@@ -179,7 +183,6 @@ n playlist-next
 b playlist-prev
 s cycle-values loop-playlist inf no ; show-text "Loop: ${loop-playlist}"
 HOME seek 0 absolute
-u quit 42
 g quit 43
 q quit
 ENTER playlist-next
@@ -187,6 +190,19 @@ EOF
     # f = add the current track to the favourites playlist (helper path in $2)
     if [[ -n "$2" ]]; then
         printf '%s\n' "f run \"sh\" \"$2\" \"\${path}\" ; show-text \"★ fav: \${filename}\" 2500" >> "$conf"
+    fi
+    # u = refresh: remember the current track first (helper path in $3), then
+    # quit with code 42 so the playlist is rescanned and playback resumes at
+    # that track (not at the track playback started from)
+    if [[ -n "$3" ]]; then
+        printf '%s\n' "u run \"sh\" \"$3\" \"\${path}\" \"$PLAY_REQ\" ; quit 42" >> "$conf"
+    else
+        echo "u quit 42" >> "$conf"
+    fi
+    # p (sample mode only) = remember the current track (helper path in $3),
+    # then quit with code 44 so the player restarts it in normal (full) mode
+    if (( TSAMPLE > 0 )) && [[ -n "$3" ]]; then
+        printf '%s\n' "p run \"sh\" \"$3\" \"\${path}\" \"$PLAY_REQ\" ; quit 44" >> "$conf"
     fi
 }
 
@@ -205,6 +221,7 @@ _show_header() {
     echo -e "${Y}  u: Refresh playlist                    ${R}"
     echo -e "${Y}  g: Go to track                         ${R}"
     echo -e "${Y}  f: Fav -> ${PL_NAME}.m3u8${R}"
+    (( TSAMPLE > 0 )) && echo -e "${Y}  p: Play this track in full${R}"
     echo -e "${C}____________________________________________________________${R}"
 }
 
@@ -248,7 +265,8 @@ _run_mpv() {
 
     local input_conf=$(mktemp)
     local fav_helper=$(mktemp)
-    trap "rm -f '$input_conf' '$fav_helper'" RETURN
+    local play_helper=$(mktemp)
+    trap "rm -f '$input_conf' '$fav_helper' '$play_helper'" RETURN
     # helper run by mpv on "f": adds the given path to $FAV_PLAYLIST (no duplicates)
     cat > "$fav_helper" <<'FAVEOF'
 f="$1"
@@ -256,7 +274,12 @@ f="$1"
 [ -f "$FAV_PLAYLIST" ] || echo "#EXTM3U" > "$FAV_PLAYLIST"
 grep -Fxq -- "$f" "$FAV_PLAYLIST" || echo "$f" >> "$FAV_PLAYLIST"
 FAVEOF
-    _create_input_conf "$input_conf" "$fav_helper"
+    # helper run by mpv on "p": writes the given path ($1) into the request file ($2)
+    cat > "$play_helper" <<'PLAYEOF'
+printf '%s' "$1" > "$2"
+PLAYEOF
+    : > "$PLAY_REQ"
+    _create_input_conf "$input_conf" "$fav_helper" "$play_helper"
 
     # Volume priority: on-disk VOL_FILE (survives full quit/restart) > in-memory LAST_VOLUME > 70 default
     local saved_vol
@@ -298,6 +321,17 @@ FAVEOF
     return $exit_code
 }
 
+# Print the track path written by the "u"/"p" helper. The helper runs
+# asynchronously inside mpv, so wait briefly until it has written something.
+_read_play_req() {
+    local _
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        [[ -s "$PLAY_REQ" ]] && break
+        sleep 0.1
+    done
+    cat "$PLAY_REQ" 2>/dev/null
+}
+
 _play_with_refresh() {
     local start_idx="${1:-0}"
 
@@ -311,7 +345,11 @@ _play_with_refresh() {
         if [[ $exit_code -eq 42 ]]; then
             echo -e "\n${G}Refreshing playlist...${R}"
 
-            local current_file="${files[$start_idx]}"
+            # Track that was playing when "u" was pressed (fallback: the track
+            # playback started from, if the helper wrote nothing)
+            local current_file
+            current_file=$(_read_play_req)
+            [[ -z "$current_file" ]] && current_file="${files[$start_idx]}"
             local old_count=$count_before
 
             if _scan_files; then
@@ -351,6 +389,28 @@ _play_with_refresh() {
                     echo -e "${Y}No such track: $goto_num${R}"; sleep 1
                 fi
             fi
+            continue
+
+        elif [[ $exit_code -eq 44 ]]; then
+            # "p" in sample mode: track the helper wrote down
+            local play_path
+            play_path=$(_read_play_req)
+
+            TSAMPLE=0   # leave sample mode: every track plays in full from now on
+
+            local found=0
+            for i in "${!files[@]}"; do
+                if [[ "${files[$i]}" == "$play_path" ]]; then
+                    start_idx=$i; found=1; break
+                fi
+            done
+
+            if (( found )); then
+                echo -e "\n${G}Sample mode off - playing in full: [track $((start_idx+1))/${#files[@]}]${R}"
+            else
+                echo -e "\n${Y}Track not found - sample mode off, restarting at [track $((start_idx+1))]${R}"
+            fi
+            sleep 1
             continue
 
         else
