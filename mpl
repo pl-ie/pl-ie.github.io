@@ -4,7 +4,7 @@
 # Press 'u' during playback to refresh the playlist without losing your position
 # Press '4' / '6' during playback to lower / raise the volume (one-handed use)
 # Press 'f' during playback to add the current track to <dirname>.m3u8 (fav)
-# Press 'd' in menu to toggle sort: newest-first <-> name (default)
+# Press 'n' in menu to toggle sort: newest-first <-> name (default)
 # Press 'o' in menu to toggle sort: oldest-first <-> name (default)
 #
 # Usage:
@@ -12,6 +12,9 @@
 #   mpl /path/to/dir     - open interactive menu in specified directory
 #   mpl -a               - play all files in current directory
 #   mpl -a /path         - play all files in specified directory
+#   mpl -s [sec]         - sample mode: play only the first [sec] seconds
+#                          (default 15) of every file in current directory
+#   mpl -s 20 /path      - sample mode in specified directory
 #   mpl course           - play files matching keyword (e.g. mpl course)
 #   mpl *course*         - same with explicit wildcards
 #   mpl course /path     - keyword filter in specified directory
@@ -39,12 +42,22 @@ DIR="."
 FILTER=""
 TIME_FILTER=0
 TIME_FILTER_MODE=""
+TSAMPLE=0          # sample mode: seconds to play per track (0 = off)
 SORT_MODE="name"   # "name" (default, sort -V), "newest" or "oldest"
 ALL_FILES=()
 files=()
 
 # === ARGUMENT PARSING ===
-if [[ "$1" == "-a" || "$1" == "--all" ]]; then
+if [[ "$1" == "-s" || "$1" == "--sample" ]]; then
+    MODE="playlist"
+    if [[ "$2" =~ ^[0-9]+$ ]]; then
+        TSAMPLE="$2"
+        DIR="${3:-.}"
+    else
+        TSAMPLE=15      # no number given: default sample length, $2 is the dir
+        DIR="${2:-.}"
+    fi
+elif [[ "$1" == "-a" || "$1" == "--all" ]]; then
     MODE="playlist"
     DIR="${2:-.}"
 elif [[ "$1" == *\** || "$1" == *\?* ]]; then
@@ -250,6 +263,13 @@ FAVEOF
     saved_vol=$(_get_saved_volume)
     local vol_param="${saved_vol:-${LAST_VOLUME:-70}}"
 
+    # Sample mode: stop every track after TSAMPLE seconds. Resume is disabled
+    # so a saved position past the sample point cannot end the track at once.
+    local end_opts=()
+    if (( TSAMPLE > 0 )); then
+        end_opts=(--no-resume-playback --end="$TSAMPLE")
+    fi
+
     clear
     _show_header
 
@@ -270,7 +290,8 @@ FAVEOF
         --watch-later-options-remove=pause \
         --input-conf="$input_conf" \
         --term-status-msg="\${time-pos}/${_SC}\${duration}${_MR} | V:\${volume}%" \
-        --term-playing-msg="${_MC}▶ ${_SC}[\${playlist-pos-1}/\${playlist-count}]${_MC} \${filename}${_MR}"
+        --term-playing-msg="${_MC}▶ ${_SC}[\${playlist-pos-1}/\${playlist-count}]${_MC} \${filename}${_MR}" \
+        "${end_opts[@]}"
 
     local exit_code=$?
     _save_volume_from_watch_later
@@ -338,17 +359,38 @@ _play_with_refresh() {
     done
 }
 
+# One menu row: the left cell is padded to a fixed width so the "|" separators
+# line up. Cells are short enough that a row stays under 30 columns (narrow
+# Termux screens).
+_menu_row() {
+    if [[ -n "$2" ]]; then
+        printf "${Y}  %-13s${R}| ${Y}%s${R}\n" "$1" "$2"
+    else
+        printf "${Y}  %s${R}\n" "$1"
+    fi
+}
+
 # === DRAW MENU ===
 _draw_menu() {
     clear
-    echo -e "${C}============================================================${R}"
+
+    # Separator fits the terminal: at most 60 chars, one less than the width
+    # on narrow screens so it never wraps onto a second line
+    local cols sep
+    cols=$(tput cols 2>/dev/null)
+    [[ "$cols" =~ ^[0-9]+$ ]] || cols=60
+    (( cols = cols > 61 ? 60 : cols - 1 ))
+    (( cols < 10 )) && cols=10
+    sep=$(printf '%*s' "$cols" '' | tr ' ' '=')
+
+    echo -e "${C}${sep}${R}"
     local header="${FULL_DIR}"
     [[ -n "$FILTER" ]] && header+=" ${Y}[filter: ${FILTER}]${C}"
     (( TIME_FILTER > 0 )) && header+=" ${M}[time: ${TIME_FILTER_MODE}${TIME_FILTER}min]${C}"
     [[ "$SORT_MODE" == "newest" ]] && header+=" ${G}[sort: newest]${C}"
     [[ "$SORT_MODE" == "oldest" ]] && header+=" ${G}[sort: oldest]${C}"
     echo -e "${C}  ${header}${R}"
-    echo -e "${C}============================================================${R}"
+    echo -e "${C}${sep}${R}"
 
     for i in "${!files[@]}"; do
         local fname
@@ -357,12 +399,12 @@ _draw_menu() {
         printf " %3d) %s\n" "$((i+1))" "$fname"
     done
 
-    echo -e "${C}============================================================${R}"
-    echo -e "${Y}  a = play all${R} | ${Y}s = shuffle${R}"
-    echo -e "${Y}  u = refresh${R}  | ${Y}t = time filter${R}"
-    echo -e "${Y}  / = search${R}   | ${Y}g = go to track${R}"
-    echo -e "${Y}  d / o = sort: newest / oldest${R}"
-    echo -e "${Y}  q = quit${R}"
+    echo -e "${C}${sep}${R}"
+    _menu_row "a = play all" "s = shuffle"
+    _menu_row "u = refresh"  "t = duration"
+    _menu_row "/ = search"   "g = go to #"
+    _menu_row "n = newest"   "o = oldest"
+    _menu_row "q = quit"
     echo -ne "  Choice: "
 }
 
@@ -437,8 +479,8 @@ while :; do
         t|T)
             _handle_time_filter
             ;;
-        d|D)
-            # Toggle: name <-> newest (pressing 'd' again returns to name)
+        n|N)
+            # Toggle: name <-> newest (pressing 'n' again returns to name)
             if [[ "$SORT_MODE" == "newest" ]]; then
                 SORT_MODE="name"
             else
