@@ -4,10 +4,11 @@
 # Press 'u' during playback to refresh the playlist without losing your position
 # Press '4' / '6' during playback to lower / raise the volume (one-handed use)
 # Press 'f' during playback to add the current track to <dirname>.m3u8 (fav)
-# Press 'p' during playback in sample mode (-s) to leave sample mode and play
-#   the current track in full (normal mode, playlist continues from there)
 # Press 'n' in menu to toggle sort: newest-first <-> name (default)
 # Press 'o' in menu to toggle sort: oldest-first <-> name (default)
+# Press 'm' in menu to switch mode: 1 = normal, 2 = sample (asks for seconds)
+# Press 's' during sample playback to enter a new sample length
+# Press 'm' during playback to switch sample <-> normal for the rest of the list
 #
 # Usage:
 #   mpl                  - open interactive menu in current directory
@@ -15,7 +16,12 @@
 #   mpl -a               - play all files in current directory
 #   mpl -a /path         - play all files in specified directory
 #   mpl -s [sec]         - sample mode: play only the first [sec] seconds
-#                          (default 15) of every file in current directory
+#                          (default 15) of every file in current directory;
+#                          the status line ends with a yellow countdown of
+#                          the seconds left in the sample; press 'p' to play
+#                          the current track in full (it resumes from where
+#                          you are); when it ends, or on 'n', sampling goes
+#                          on with the next track, on 'b' with the previous
 #   mpl -s 20 /path      - sample mode in specified directory
 #   mpl course           - play files matching keyword (e.g. mpl course)
 #   mpl *course*         - same with explicit wildcards
@@ -29,6 +35,8 @@ G='\033[1;32m'; Y='\033[1;33m'; C='\033[1;36m'; M='\033[1;35m'; R='\033[0m'
 _MC=$'\033[1;36m'
 _MR=$'\033[0m'
 _SC=$'\033[1;32m'   # bold bright green for track duration and the [n/total] field
+_YC=$'\033[1;33m'   # bold yellow for the sample countdown (sample mode)
+_WC=$'\033[1;37m'   # bold white for the "/" separators in the status line
 
 # === CONFIG ===
 WATCH_LATER_BASE="$HOME/.config/mpv/watch_later"
@@ -36,9 +44,7 @@ mkdir -p "$WATCH_LATER_BASE"
 VOL_FILE="$WATCH_LATER_BASE/volume.txt"
 
 PLAYLIST_FILE=$(mktemp)
-PLAY_REQ=$(mktemp)   # path of the track that "p" asked to play in full
-export PLAY_REQ
-trap "rm -f '$PLAYLIST_FILE' '$PLAY_REQ'" EXIT
+trap "rm -f '$PLAYLIST_FILE'" EXIT
 
 # === STATE ===
 MODE="menu"
@@ -47,7 +53,9 @@ FILTER=""
 TIME_FILTER=0
 TIME_FILTER_MODE=""
 TSAMPLE=0          # sample mode: seconds to play per track (0 = off)
+SAMPLE_LAST=15     # last chosen sample length (default offered by the 'm' menu)
 SORT_MODE="name"   # "name" (default, sort -V), "newest" or "oldest"
+CUR_IDX=0          # playlist index of the track that was playing when mpv quit
 ALL_FILES=()
 files=()
 
@@ -75,6 +83,8 @@ elif [[ -n "$1" ]]; then
     FILTER="*$1*"
     DIR="${2:-.}"
 fi
+
+(( TSAMPLE > 0 )) && SAMPLE_LAST=$TSAMPLE
 
 FULL_DIR=$(realpath "$DIR" 2>/dev/null || echo "$DIR")
 
@@ -167,6 +177,7 @@ _filter_active() {
 }
 
 # Write mpv key bindings to a temp input config
+# $1 = config file, $2 = favourites helper script, $3 = run mode ("full" or not)
 _create_input_conf() {
     local conf="$1"
     cat > "$conf" <<'EOF'
@@ -179,10 +190,9 @@ LEFT seek -20 relative+keyframes
 RIGHT seek +20 relative+keyframes
 UP seek +120 relative+keyframes
 DOWN seek -120 relative+keyframes
-n playlist-next
-b playlist-prev
-s cycle-values loop-playlist inf no ; show-text "Loop: ${loop-playlist}"
 HOME seek 0 absolute
+m quit 50
+u quit 42
 g quit 43
 q quit
 ENTER playlist-next
@@ -191,19 +201,90 @@ EOF
     if [[ -n "$2" ]]; then
         printf '%s\n' "f run \"sh\" \"$2\" \"\${path}\" ; show-text \"★ fav: \${filename}\" 2500" >> "$conf"
     fi
-    # u = refresh: remember the current track first (helper path in $3), then
-    # quit with code 42 so the playlist is rescanned and playback resumes at
-    # that track (not at the track playback started from)
-    if [[ -n "$3" ]]; then
-        printf '%s\n' "u run \"sh\" \"$3\" \"\${path}\" \"$PLAY_REQ\" ; quit 42" >> "$conf"
+    # Sample mode only (not while a full track is playing):
+    #   p = quit with code 44, the shell then replays the current track in full
+    #   s = quit with code 49, the shell asks for a new sample length
+    # Otherwise s toggles playlist looping.
+    if (( TSAMPLE > 0 )) && [[ "$3" != "full" ]]; then
+        printf '%s\n' "p quit 44" "s quit 49" >> "$conf"
     else
-        echo "u quit 42" >> "$conf"
+        printf '%s\n' 's cycle-values loop-playlist inf no ; show-text "Loop: ${loop-playlist}"' >> "$conf"
     fi
-    # p (sample mode only) = remember the current track (helper path in $3),
-    # then quit with code 44 so the player restarts it in normal (full) mode
-    if (( TSAMPLE > 0 )) && [[ -n "$3" ]]; then
-        printf '%s\n' "p run \"sh\" \"$3\" \"\${path}\" \"$PLAY_REQ\" ; quit 44" >> "$conf"
+    # n / b = next / previous track. While a full track is playing they quit
+    # with codes 47 / 48 instead, so the shell goes back to sampling.
+    if [[ "$3" == "full" ]]; then
+        printf '%s\n' "n quit 47" "b quit 48" >> "$conf"
+    else
+        printf '%s\n' "n playlist-next" "b playlist-prev" >> "$conf"
     fi
+}
+
+# Write the mpv Lua helper (loaded in every mode). Script options:
+#   mpl-sample  seconds per track in sample mode (0 = off)
+#   mpl-full    "yes" while one track is played in full from sample mode
+#   mpl-state   file that receives the current playlist index
+_create_mpl_lua() {
+    cat > "$1" <<'EOF'
+local sample = tonumber(mp.get_opt("mpl-sample")) or 0
+local full   = mp.get_opt("mpl-full") == "yes"
+local state  = mp.get_opt("mpl-state")
+
+-- keep the index of the current track in the state file, so the shell can
+-- tell which track was playing when mpv quit (used by u, g and p)
+if state and state ~= "" then
+    mp.observe_property("playlist-pos", "number", function(_, pos)
+        if not pos then return end
+        local f = io.open(state, "w")
+        if f then
+            f:write(string.format("%d", pos), "\n")
+            f:close()
+        end
+    end)
+end
+
+-- full mode: when the track ends by itself, quit with code 46 so the shell
+-- can go back to sampling with the next track
+if full then
+    mp.register_event("end-file", function(ev)
+        if ev.reason == "eof" then mp.commandv("quit", "46") end
+    end)
+end
+
+-- sample mode: status line ends with a yellow countdown of the seconds left
+-- in the sample. If the track is shorter than the sample, the countdown runs
+-- to the real end of the track.
+if sample > 0 then
+    local ESC = "\27["
+    local W = ESC .. "1;37m"   -- bold white: "/" separators
+    local G = ESC .. "1;32m"   -- bold green: track duration
+    local Y = ESC .. "1;33m"   -- bold yellow: seconds left
+    local R = ESC .. "0m"
+
+    local last = nil
+
+    local function update()
+        local pos = mp.get_property_number("time-pos")
+        if not pos then return end
+
+        local total = sample
+        local dur = mp.get_property_number("duration")
+        if dur and dur > 0 and dur < total then total = dur end
+
+        local left = math.ceil(total - pos)
+        if left < 0 then left = 0 end
+
+        -- only touch the status line when the displayed second changes
+        if left == last then return end
+        last = left
+
+        mp.set_property("term-status-msg",
+            "${time-pos}" .. W .. "/" .. G .. "${duration}" .. W .. "/" ..
+            Y .. string.format("%d", left) .. R .. " | V:${volume}%")
+    end
+
+    mp.observe_property("time-pos", "number", update)
+end
+EOF
 }
 
 # Print player header with key bindings
@@ -216,12 +297,21 @@ _show_header() {
     echo -e "${Y}  Left/Right : Seek -20 / +20 sec        ${R}"
     echo -e "${Y}  Up/Down    : Seek +120 / -120 sec      ${R}"
     echo -e "${Y}  n / b  : Next / Previous               ${R}"
-    echo -e "${Y}  SPACE  : Pause | s: Shuffle            ${R}"
+    if (( TSAMPLE > 0 )); then
+        echo -e "${Y}  SPACE  : Pause | s: Sample length      ${R}"
+    else
+        echo -e "${Y}  SPACE  : Pause | s: Shuffle            ${R}"
+    fi
     echo -e "${Y}  HOME   : Restart | q: Menu              ${R}"
     echo -e "${Y}  u: Refresh playlist                    ${R}"
     echo -e "${Y}  g: Go to track                         ${R}"
+    (( TSAMPLE > 0 )) && echo -e "${Y}  p: Play this track in full             ${R}"
+    if (( TSAMPLE > 0 )); then
+        echo -e "${Y}  m: Normal mode (stop sampling)         ${R}"
+    else
+        echo -e "${Y}  m: Sample mode                         ${R}"
+    fi
     echo -e "${Y}  f: Fav -> ${PL_NAME}.m3u8${R}"
-    (( TSAMPLE > 0 )) && echo -e "${Y}  p: Play this track in full${R}"
     echo -e "${C}____________________________________________________________${R}"
 }
 
@@ -259,14 +349,26 @@ _save_volume_from_watch_later() {
     fi
 }
 
-# Launch mpv with the current PLAYLIST_FILE starting at given index
+# Launch mpv with the current PLAYLIST_FILE starting at given index.
+# $2 = "full": sample mode is off for this run, the whole track is played
+#      (resuming from the position saved when 'p' was pressed).
+# Sets CUR_IDX to the playlist index of the track playing when mpv quit.
 _run_mpv() {
     local start_idx="${1:-0}"
+    local run_mode="${2:-normal}"
+
+    # Sample length for this run (0 while a full track is played)
+    local sample=$TSAMPLE
+    [[ "$run_mode" == "full" ]] && sample=0
 
     local input_conf=$(mktemp)
     local fav_helper=$(mktemp)
-    local play_helper=$(mktemp)
-    trap "rm -f '$input_conf' '$fav_helper' '$play_helper'" RETURN
+    local state_file=$(mktemp)
+    local mpl_lua=$(mktemp --suffix=.lua)   # mpv needs the .lua suffix
+    _create_mpl_lua "$mpl_lua"
+    # Set after all temp files exist so the trap string contains every path
+    trap "rm -f '$input_conf' '$fav_helper' '$state_file' '$mpl_lua'" RETURN
+
     # helper run by mpv on "f": adds the given path to $FAV_PLAYLIST (no duplicates)
     cat > "$fav_helper" <<'FAVEOF'
 f="$1"
@@ -274,30 +376,40 @@ f="$1"
 [ -f "$FAV_PLAYLIST" ] || echo "#EXTM3U" > "$FAV_PLAYLIST"
 grep -Fxq -- "$f" "$FAV_PLAYLIST" || echo "$f" >> "$FAV_PLAYLIST"
 FAVEOF
-    # helper run by mpv on "p": writes the given path ($1) into the request file ($2)
-    cat > "$play_helper" <<'PLAYEOF'
-printf '%s' "$1" > "$2"
-PLAYEOF
-    : > "$PLAY_REQ"
-    _create_input_conf "$input_conf" "$fav_helper" "$play_helper"
+    _create_input_conf "$input_conf" "$fav_helper" "$run_mode"
 
     # Volume priority: on-disk VOL_FILE (survives full quit/restart) > in-memory LAST_VOLUME > 70 default
     local saved_vol
     saved_vol=$(_get_saved_volume)
     local vol_param="${saved_vol:-${LAST_VOLUME:-70}}"
 
-    # Sample mode: stop every track after TSAMPLE seconds. Resume is disabled
+    # Sample mode: stop every track after $sample seconds. Resume is disabled
     # so a saved position past the sample point cannot end the track at once.
     local end_opts=()
-    if (( TSAMPLE > 0 )); then
-        end_opts=(--no-resume-playback --end="$TSAMPLE")
+    if (( sample > 0 )); then
+        end_opts=(--no-resume-playback --end="$sample")
     fi
+
+    # Options for the Lua helper (it also draws the sample countdown)
+    local full_flag="no"
+    [[ "$run_mode" == "full" ]] && full_flag="yes"
+    local script_opts="mpl-sample=${sample},mpl-full=${full_flag},mpl-state=${state_file}"
+
+    # Status line: time-pos / duration (bold green) [/ yellow countdown in
+    # sample mode] | volume. The "/" separators are bold white. The track
+    # counter [n/total] is shown in the colored "playing" line instead.
+    # In sample mode the Lua helper replaces this message with a live
+    # countdown; the static sample length below is only the fallback.
+    local status_msg="\${time-pos}${_WC}/${_SC}\${duration}${_MR}"
+    if (( sample > 0 )); then
+        status_msg+="${_WC}/${_YC}${sample}${_MR}"
+    fi
+    status_msg+=" | V:\${volume}%"
 
     clear
     _show_header
+    [[ "$run_mode" == "full" ]] && echo -e "${M}  FULL TRACK - end/n/b: back to sampling${R}"
 
-    # Status line: the track counter [n/total] is already shown in the colored
-    # "playing" line, so it is not repeated here. Duration is bold green, V: is plain white.
     mpv \
         --no-video \
         --audio-display=no \
@@ -312,44 +424,62 @@ PLAYEOF
         --watch-later-directory="$WATCH_LATER_BASE" \
         --watch-later-options-remove=pause \
         --input-conf="$input_conf" \
-        --term-status-msg="\${time-pos}/${_SC}\${duration}${_MR} | V:\${volume}%" \
+        --term-status-msg="$status_msg" \
         --term-playing-msg="${_MC}▶ ${_SC}[\${playlist-pos-1}/\${playlist-count}]${_MC} \${filename}${_MR}" \
+        --script="$mpl_lua" \
+        --script-opts="$script_opts" \
         "${end_opts[@]}"
 
     local exit_code=$?
+
+    # Which track was playing at exit? Falls back to the start index if the
+    # Lua helper did not write the state file.
+    CUR_IDX="$start_idx"
+    local st
+    st=$(cat "$state_file" 2>/dev/null)
+    [[ "$st" =~ ^[0-9]+$ ]] && CUR_IDX="$st"
+
     _save_volume_from_watch_later
     return $exit_code
 }
 
-# Print the track path written by the "u"/"p" helper. The helper runs
-# asynchronously inside mpv, so wait briefly until it has written something.
-_read_play_req() {
-    local _
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        [[ -s "$PLAY_REQ" ]] && break
-        sleep 0.1
-    done
-    cat "$PLAY_REQ" 2>/dev/null
+# Ask for the sample length in seconds (Enter or an invalid answer = the last
+# value) and store it in TSAMPLE (active) and SAMPLE_LAST (default offered)
+_ask_sample_secs() {
+    local new_s
+    echo -ne "${G}Sample length in seconds [${SAMPLE_LAST}]: ${R}"
+    read -r new_s
+    new_s=$(echo "$new_s" | tr -cd '0-9')
+    if [[ -z "$new_s" ]] || (( 10#$new_s == 0 )); then
+        new_s=$SAMPLE_LAST
+    fi
+    TSAMPLE=$((10#$new_s))
+    SAMPLE_LAST=$TSAMPLE
 }
 
+# Exit codes of mpv handled here:
+#   42 = u (refresh playlist), 43 = g (go to track),
+#   44 = p (sample mode: play the current track in full),
+#   46 = the full track started with p ended by itself,
+#   47 / 48 = n / b pressed while that full track is playing,
+#   49 = s (sample mode: ask for a new sample length),
+#   50 = m (switch sample <-> normal for the rest of the list)
 _play_with_refresh() {
     local start_idx="${1:-0}"
+    local run_mode="normal"   # "full" while a single track is played in full
 
     while true; do
         printf "%s\n" "${files[@]}" > "$PLAYLIST_FILE"
         local count_before=${#files[@]}
 
-        _run_mpv "$start_idx"
+        _run_mpv "$start_idx" "$run_mode"
         local exit_code=$?
+        local cur_idx=$CUR_IDX
 
         if [[ $exit_code -eq 42 ]]; then
             echo -e "\n${G}Refreshing playlist...${R}"
 
-            # Track that was playing when "u" was pressed (fallback: the track
-            # playback started from, if the helper wrote nothing)
-            local current_file
-            current_file=$(_read_play_req)
-            [[ -z "$current_file" ]] && current_file="${files[$start_idx]}"
+            local current_file="${files[$cur_idx]}"
             local old_count=$count_before
 
             if _scan_files; then
@@ -378,6 +508,8 @@ _play_with_refresh() {
             continue
 
         elif [[ $exit_code -eq 43 ]]; then
+            # an empty or invalid answer stays on the current track
+            start_idx=$cur_idx
             echo -ne "\n${G}Go to track (1-${#files[@]}): ${R}"
             read -r goto_num
             goto_num=$(echo "$goto_num" | tr -cd '0-9')
@@ -385,6 +517,7 @@ _play_with_refresh() {
                 local goto_idx=$((goto_num - 1))
                 if (( goto_idx >= 0 && goto_idx < ${#files[@]} )); then
                     start_idx=$goto_idx
+                    run_mode="normal"
                 else
                     echo -e "${Y}No such track: $goto_num${R}"; sleep 1
                 fi
@@ -392,25 +525,49 @@ _play_with_refresh() {
             continue
 
         elif [[ $exit_code -eq 44 ]]; then
-            # "p" in sample mode: track the helper wrote down
-            local play_path
-            play_path=$(_read_play_req)
+            # p: replay the current track in full, from the saved position
+            start_idx=$cur_idx
+            run_mode="full"
+            continue
 
-            TSAMPLE=0   # leave sample mode: every track plays in full from now on
+        elif [[ $exit_code -eq 46 || $exit_code -eq 47 ]]; then
+            # full track ended (46) or n pressed (47): sample the next track
+            start_idx=$((cur_idx + 1))
+            run_mode="normal"
+            (( start_idx >= ${#files[@]} )) && return 0
+            continue
 
-            local found=0
-            for i in "${!files[@]}"; do
-                if [[ "${files[$i]}" == "$play_path" ]]; then
-                    start_idx=$i; found=1; break
-                fi
-            done
+        elif [[ $exit_code -eq 48 ]]; then
+            # b pressed during the full track: sample the previous track
+            start_idx=$((cur_idx - 1))
+            (( start_idx < 0 )) && start_idx=0
+            run_mode="normal"
+            continue
 
-            if (( found )); then
-                echo -e "\n${G}Sample mode off - playing in full: [track $((start_idx+1))/${#files[@]}]${R}"
+        elif [[ $exit_code -eq 49 ]]; then
+            # s: new sample length (an empty or invalid answer keeps the old
+            # one); the current track restarts with it
+            start_idx=$cur_idx
+            run_mode="normal"
+            echo
+            _ask_sample_secs
+            continue
+
+        elif [[ $exit_code -eq 50 ]]; then
+            # m: switch the mode for the rest of the list; the current track
+            # carries on in the new mode
+            start_idx=$cur_idx
+            run_mode="normal"
+            echo
+            if (( TSAMPLE > 0 )); then
+                # sample (or full) -> normal: the track goes on in full from
+                # the position saved at quit, and so do the following tracks
+                TSAMPLE=0
+                echo -e "${G}Mode: normal${R}"; sleep 0.5
             else
-                echo -e "\n${Y}Track not found - sample mode off, restarting at [track $((start_idx+1))]${R}"
+                # normal -> sample: the track restarts as a sample
+                _ask_sample_secs
             fi
-            sleep 1
             continue
 
         else
@@ -449,6 +606,7 @@ _draw_menu() {
     (( TIME_FILTER > 0 )) && header+=" ${M}[time: ${TIME_FILTER_MODE}${TIME_FILTER}min]${C}"
     [[ "$SORT_MODE" == "newest" ]] && header+=" ${G}[sort: newest]${C}"
     [[ "$SORT_MODE" == "oldest" ]] && header+=" ${G}[sort: oldest]${C}"
+    (( TSAMPLE > 0 )) && header+=" ${Y}[sample: ${TSAMPLE}s]${C}"
     echo -e "${C}  ${header}${R}"
     echo -e "${C}${sep}${R}"
 
@@ -464,7 +622,7 @@ _draw_menu() {
     _menu_row "u = refresh"  "t = duration"
     _menu_row "/ = search"   "g = go to #"
     _menu_row "n = newest"   "o = oldest"
-    _menu_row "q = quit"
+    _menu_row "m = mode"     "q = quit"
     echo -ne "  Choice: "
 }
 
@@ -497,6 +655,29 @@ _handle_time_filter() {
             echo -e "${G}Found ${#files[@]} files${R}"; sleep 0.5
         fi
     fi
+}
+
+# === MODE HANDLER ===
+# m in the menu: 1 = normal (full tracks), 2 = sample (first N seconds of each
+# track). The active sample length is kept in TSAMPLE (0 = normal mode); the
+# last chosen value stays in SAMPLE_LAST and is offered as the default.
+_handle_mode() {
+    local mode_key
+    echo -e "\r\033[K"
+    echo -e "${G}Mode:${R}  ${Y}1${R} = normal   ${Y}2${R} = sample"
+    echo -ne "${G}Choice (1/2): ${R}"
+    read -r -n 1 mode_key
+    echo
+    case "$mode_key" in
+        1)
+            TSAMPLE=0
+            echo -e "${G}Mode: normal${R}"; sleep 0.5
+            ;;
+        2)
+            _ask_sample_secs
+            echo -e "${G}Mode: sample ${TSAMPLE}s${R}"; sleep 0.5
+            ;;
+    esac
 }
 
 # === STARTUP ===
@@ -568,6 +749,9 @@ while :; do
                 echo -e "${Y}No files found${R}"
                 sleep 1
             fi
+            ;;
+        m|M)
+            _handle_mode
             ;;
         q|Q)
             clear; exit 0
