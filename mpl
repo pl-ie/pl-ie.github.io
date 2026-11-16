@@ -6,7 +6,8 @@
 # Press 'f' during playback to add the current track to <dirname>.m3u8 (fav)
 # Press 'n' in menu to toggle sort: newest-first <-> name (default)
 # Press 'o' in menu to toggle sort: oldest-first <-> name (default)
-# Press 'm' in menu to switch mode: 1 = normal, 2 = sample (asks for seconds)
+# Press 'm' in menu to switch mode: 1 = normal, 2 = sample (asks for seconds);
+# playing starts at once in the chosen mode
 # Press 's' during sample playback to enter a new sample length
 # Press 'm' during playback to switch sample <-> normal for the rest of the list
 #
@@ -659,10 +660,11 @@ _handle_time_filter() {
 
 # === MODE HANDLER ===
 # m in the menu: 1 = normal (full tracks), 2 = sample (first N seconds of each
-# track). The active sample length is kept in TSAMPLE (0 = normal mode); the
-# last chosen value stays in SAMPLE_LAST and is offered as the default.
+# track; asks for the length). Either choice starts playing at once, from the
+# first track. The active sample length is kept in TSAMPLE (0 = normal mode);
+# the last chosen value stays in SAMPLE_LAST and is offered as the default.
 _handle_mode() {
-    local mode_key
+    local mode_key swallow
     echo -e "\r\033[K"
     echo -e "${G}Mode:${R}  ${Y}1${R} = normal   ${Y}2${R} = sample"
     echo -ne "${G}Choice (1/2): ${R}"
@@ -671,11 +673,15 @@ _handle_mode() {
     case "$mode_key" in
         1)
             TSAMPLE=0
-            echo -e "${G}Mode: normal${R}"; sleep 0.5
+            # swallow an Enter typed after the 1 (mpv would take it as "next")
+            read -r -t 0.4 -n 1 swallow
+            # start playing at once from the first track (like 'a')
+            _play_with_refresh 0
             ;;
         2)
             _ask_sample_secs
-            echo -e "${G}Mode: sample ${TSAMPLE}s${R}"; sleep 0.5
+            # start playing at once from the first track (like 'a')
+            _play_with_refresh 0
             ;;
     esac
 }
