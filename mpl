@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# MPL PRO v3.2.0 - Media Playlist Player
+# MPL PRO v3.3.0 - Media Playlist Player
 # Play local audio/video files with playlist management
 # Press 'u' during playback to refresh the playlist without losing your position
 # Press '4' / '6' during playback to lower / raise the volume (one-handed use)
 # Press 'f' during playback to add the current track to <dirname>.m3u8 (fav)
+# Press 'd' / 'o' during playback to re-sort the list: newest-first / oldest-first
+# (press the same key again to go back to name order); the current track
+# keeps playing, the rest of the list follows the new order
 # Press 'n' in menu to toggle sort: newest-first <-> name (default)
 # Press 'o' in menu to toggle sort: oldest-first <-> name (default)
 # Press 'm' in menu to switch mode: 1 = normal, 2 = sample (asks for seconds);
@@ -16,6 +19,9 @@
 #   mpl /path/to/dir     - open interactive menu in specified directory
 #   mpl -a               - play all files in current directory
 #   mpl -a /path         - play all files in specified directory
+#   mpl -d               - play all files, newest first (like -a)
+#   mpl -o               - play all files, oldest first (like -a)
+#   mpl -d -s 15 /path   - -d / -o combine with -s, -n, a keyword or a dir
 #   mpl -s [sec]         - sample mode: play only the first [sec] seconds
 #                          (default 15) of every file in current directory;
 #                          the status line ends with a yellow countdown of
@@ -24,6 +30,10 @@
 #                          you are); when it ends, or on 'n', sampling goes
 #                          on with the next track, on 'b' with the previous
 #   mpl -s 20 /path      - sample mode in specified directory
+#   mpl -n N             - play all files, starting at track number N
+#                          (numbered as in the menu list)
+#   mpl -s 15 -n 10      - options combine in any order: sample mode,
+#                          starting at track 10
 #   mpl course           - play files matching keyword (e.g. mpl course)
 #   mpl *course*         - same with explicit wildcards
 #   mpl course /path     - keyword filter in specified directory
@@ -55,35 +65,68 @@ TIME_FILTER=0
 TIME_FILTER_MODE=""
 TSAMPLE=0          # sample mode: seconds to play per track (0 = off)
 SAMPLE_LAST=15     # last chosen sample length (default offered by the 'm' menu)
+START_NUM=0        # -n N: track number to start playing at (1-based, 0 = off)
 SORT_MODE="name"   # "name" (default, sort -V), "newest" or "oldest"
 CUR_IDX=0          # playlist index of the track that was playing when mpv quit
 ALL_FILES=()
 files=()
 
 # === ARGUMENT PARSING ===
-if [[ "$1" == "-s" || "$1" == "--sample" ]]; then
-    MODE="playlist"
-    if [[ "$2" =~ ^[0-9]+$ ]]; then
-        TSAMPLE="$2"
-        DIR="${3:-.}"
-    else
-        TSAMPLE=15      # no number given: default sample length, $2 is the dir
-        DIR="${2:-.}"
-    fi
-elif [[ "$1" == "-a" || "$1" == "--all" ]]; then
-    MODE="playlist"
-    DIR="${2:-.}"
-elif [[ "$1" == *\** || "$1" == *\?* ]]; then
-    MODE="filter"
-    FILTER="$1"
-    DIR="${2:-.}"
-elif [[ -n "$1" && -d "$1" ]]; then
-    DIR="$1"
-elif [[ -n "$1" ]]; then
-    MODE="filter"
-    FILTER="*$1*"
-    DIR="${2:-.}"
+# Options (-s, -a, -d, -o, -n) may come in any order and combine; what is left
+# over is the keyword/directory: [keyword|dir] [dir]
+POSITIONAL=()
+while (( $# > 0 )); do
+    case "$1" in
+        -s|--sample)
+            MODE="playlist"
+            if [[ "$2" =~ ^[0-9]+$ ]]; then
+                TSAMPLE="$2"
+                shift
+            else
+                TSAMPLE=15      # no number given: default sample length
+            fi
+            ;;
+        -a|--all)
+            MODE="playlist"
+            ;;
+        -d|--newest)
+            # play all files, newest first (the last of -d / -o wins)
+            MODE="playlist"
+            SORT_MODE="newest"
+            ;;
+        -o|--oldest)
+            # play all files, oldest first (the last of -d / -o wins)
+            MODE="playlist"
+            SORT_MODE="oldest"
+            ;;
+        -n|--number)
+            if [[ "$2" =~ ^[0-9]+$ ]] && (( 10#$2 > 0 )); then
+                START_NUM=$((10#$2))
+                shift
+            else
+                echo "mpl: -n needs a track number (1 or more)" >&2
+                exit 1
+            fi
+            MODE="playlist"
+            ;;
+        *)
+            POSITIONAL+=("$1")
+            ;;
+    esac
+    shift
+done
+
+if [[ "${POSITIONAL[0]}" == *\** || "${POSITIONAL[0]}" == *\?* ]]; then
+    FILTER="${POSITIONAL[0]}"
+    DIR="${POSITIONAL[1]:-.}"
+elif [[ -n "${POSITIONAL[0]}" && -d "${POSITIONAL[0]}" ]]; then
+    DIR="${POSITIONAL[0]}"
+elif [[ -n "${POSITIONAL[0]}" ]]; then
+    FILTER="*${POSITIONAL[0]}*"
+    DIR="${POSITIONAL[1]:-.}"
 fi
+# a keyword on its own opens the filtered menu; with -s/-a/-d/-o/-n it plays
+[[ -n "$FILTER" && "$MODE" == "menu" ]] && MODE="filter"
 
 (( TSAMPLE > 0 )) && SAMPLE_LAST=$TSAMPLE
 
@@ -195,6 +238,8 @@ HOME seek 0 absolute
 m quit 50
 u quit 42
 g quit 43
+d quit 51
+o quit 52
 q quit
 ENTER playlist-next
 EOF
@@ -231,7 +276,7 @@ local full   = mp.get_opt("mpl-full") == "yes"
 local state  = mp.get_opt("mpl-state")
 
 -- keep the index of the current track in the state file, so the shell can
--- tell which track was playing when mpv quit (used by u, g and p)
+-- tell which track was playing when mpv quit (used by u, g, p, d and o)
 if state and state ~= "" then
     mp.observe_property("playlist-pos", "number", function(_, pos)
         if not pos then return end
@@ -291,7 +336,7 @@ EOF
 # Print player header with key bindings
 _show_header() {
     echo -e "${C}____________________________________________________________${R}"
-    echo -e "${C}  MPL PRO v3.2.0 | OFFLINE PLAYER                          ${R}"
+    echo -e "${C}  MPL PRO v3.3.0 | OFFLINE PLAYER                          ${R}"
     echo -e "${C}____________________________________________________________${R}"
     echo -e "${Y}  4 / 6  : Volume down / up              ${R}"
     echo -e "${Y}  , / .  : Seek -10 / +10 sec            ${R}"
@@ -305,6 +350,7 @@ _show_header() {
     fi
     echo -e "${Y}  HOME   : Restart | q: Menu              ${R}"
     echo -e "${Y}  u: Refresh playlist                    ${R}"
+    echo -e "${Y}  d / o  : Sort newest / oldest          ${R}"
     echo -e "${Y}  g: Go to track                         ${R}"
     (( TSAMPLE > 0 )) && echo -e "${Y}  p: Play this track in full             ${R}"
     if (( TSAMPLE > 0 )); then
@@ -464,7 +510,8 @@ _ask_sample_secs() {
 #   46 = the full track started with p ended by itself,
 #   47 / 48 = n / b pressed while that full track is playing,
 #   49 = s (sample mode: ask for a new sample length),
-#   50 = m (switch sample <-> normal for the rest of the list)
+#   50 = m (switch sample <-> normal for the rest of the list),
+#   51 = d (re-sort: newest <-> name), 52 = o (re-sort: oldest <-> name)
 _play_with_refresh() {
     local start_idx="${1:-0}"
     local run_mode="normal"   # "full" while a single track is played in full
@@ -569,6 +616,45 @@ _play_with_refresh() {
                 # normal -> sample: the track restarts as a sample
                 _ask_sample_secs
             fi
+            continue
+
+        elif [[ $exit_code -eq 51 || $exit_code -eq 52 ]]; then
+            # d (51) / o (52): switch the sort order, same toggle as n / o in
+            # the menu (the key pressed again goes back to name order). The
+            # current track carries on (position restored from watch_later,
+            # run mode unchanged); the rest of the list follows the new order.
+            local want="newest"
+            [[ $exit_code -eq 52 ]] && want="oldest"
+            if [[ "$SORT_MODE" == "$want" ]]; then
+                SORT_MODE="name"
+            else
+                SORT_MODE="$want"
+            fi
+
+            local sort_file="${files[$cur_idx]}"
+
+            if _scan_files; then
+                local sort_label="by name"
+                [[ "$SORT_MODE" == "newest" ]] && sort_label="newest first"
+                [[ "$SORT_MODE" == "oldest" ]] && sort_label="oldest first"
+                echo -e "\n${G}Sort: ${sort_label}${R}"
+            else
+                echo -e "\n${Y}No files found - returning to menu${R}"
+                sleep 1
+                return 1
+            fi
+
+            start_idx=0
+            if [[ -n "$sort_file" ]]; then
+                for i in "${!files[@]}"; do
+                    if [[ "${files[$i]}" == "$sort_file" ]]; then
+                        start_idx=$i; break
+                    fi
+                done
+            fi
+
+            echo -e "${M}Resuming: [track $((start_idx+1))/${#files[@]}]${R}"
+            sleep 0.7
             continue
 
         else
@@ -690,7 +776,16 @@ _handle_mode() {
 _scan_files || { echo -e "${Y}No media files found in: $FULL_DIR${R}"; exit 1; }
 
 if [[ "$MODE" == "playlist" ]]; then
-    _play_with_refresh 0
+    # -n N: start at track number N of the list (1-based, as in the menu)
+    START_IDX=0
+    if (( START_NUM > 0 )); then
+        if (( START_NUM > ${#files[@]} )); then
+            echo -e "${Y}No track ${START_NUM} - the list has ${#files[@]} tracks${R}"
+            exit 1
+        fi
+        START_IDX=$((START_NUM - 1))
+    fi
+    _play_with_refresh "$START_IDX"
     exit 0
 fi
 
