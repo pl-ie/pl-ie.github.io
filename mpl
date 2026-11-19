@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MPL PRO v3.3.0 - Media Playlist Player
+# MPL PRO v3.3.1 - Media Playlist Player
 # Play local audio/video files with playlist management
 # Press 'u' during playback to refresh the playlist without losing your position
 # Press 'd' / 'o' during playback to sort newest-first / oldest-first (press the
@@ -334,7 +334,7 @@ EOF
 # Print player header with key bindings
 _show_header() {
     echo -e "${C}____________________________________________________________${R}"
-    echo -e "${C}  MPL PRO v3.3.0 | OFFLINE PLAYER                          ${R}"
+    echo -e "${C}  MPL PRO v3.3.1 | OFFLINE PLAYER                          ${R}"
     echo -e "${C}____________________________________________________________${R}"
     echo -e "${Y}  4 / 6  : Volume down / up              ${R}"
     echo -e "${Y}  , / .  : Seek -10 / +10 sec            ${R}"
@@ -348,7 +348,11 @@ _show_header() {
     fi
     echo -e "${Y}  HOME   : Restart | q: Menu              ${R}"
     echo -e "${Y}  u: Refresh playlist                    ${R}"
-    echo -e "${Y}  d / o  : Sort newest / oldest          ${R}"
+    # d / o: the active date sort is shown in green
+    local c_d="$Y" c_o="$Y"
+    [[ "$SORT_MODE" == "newest" ]] && c_d="$G"
+    [[ "$SORT_MODE" == "oldest" ]] && c_o="$G"
+    echo -e "${c_d}  d${Y} / ${c_o}o${Y}  : Sort ${c_d}newest${Y} / ${c_o}oldest${Y}          ${R}"
     echo -e "${Y}  g: Go to track                         ${R}"
     (( TSAMPLE > 0 )) && echo -e "${Y}  p: Play this track in full             ${R}"
     if (( TSAMPLE > 0 )); then
@@ -646,11 +650,14 @@ _play_with_refresh() {
 # One menu row: the left cell is padded to a fixed width so the "|" separators
 # line up. Cells are short enough that a row stays under 30 columns (narrow
 # Termux screens).
+# $3 / $4 = optional colors of the left / right cell (default: yellow). They go
+# into the printf format (not into the arguments) so the \033 codes are expanded.
 _menu_row() {
+    local cl="${3:-$Y}" cr="${4:-$Y}"
     if [[ -n "$2" ]]; then
-        printf "${Y}  %-13s${R}| ${Y}%s${R}\n" "$1" "$2"
+        printf "${cl}  %-13s${R}| ${cr}%s${R}\n" "$1" "$2"
     else
-        printf "${Y}  %s${R}\n" "$1"
+        printf "${cl}  %s${R}\n" "$1"
     fi
 }
 
@@ -685,10 +692,14 @@ _draw_menu() {
     done
 
     echo -e "${C}${sep}${R}"
+    # n / o cells: the active date sort is shown in green
+    local c_new="$Y" c_old="$Y"
+    [[ "$SORT_MODE" == "newest" ]] && c_new="$G"
+    [[ "$SORT_MODE" == "oldest" ]] && c_old="$G"
     _menu_row "a = play all" "s = shuffle"
     _menu_row "u = refresh"  "t = duration"
     _menu_row "/ = search"   "g = go to #"
-    _menu_row "n = newest"   "o = oldest"
+    _menu_row "n = newest"   "o = oldest" "$c_new" "$c_old"
     _menu_row "m = mode"     "q = quit"
     echo -ne "  Choice: "
 }
