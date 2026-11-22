@@ -1,10 +1,19 @@
 #!/bin/bash
-# MTP v1.3 - Media Tail Player
+# MTP v1.4 - Media Tail Player
 # Play .part files while downloading, recording or generating TTS
 # r = refresh (resume with more buffer)
 # q = quit (saves position)
 # 4 / 6 = volume down / up (one-handed use)
 # v1.3: auto-reload of growing .part files (detects size/duration change)
+# v1.4: word filter - play the newest file whose name contains given words
+#
+# Usage:
+#   mtp                 - play the newest .part file (else the newest media file)
+#   mtp file            - play the given file
+#   mtp word [word ...] - play the newest file whose name contains ALL the words
+#                         (case-insensitive); .part files (downloads in
+#                         progress) come first; * and ? work as wildcards
+#                         (quote them so the shell does not expand them)
 
 G='\033[1;32m'
 Y='\033[1;33m'
@@ -214,7 +223,7 @@ _show_file_info() {
     session_dir=$(_session_dir "$file")
 
     echo -e "${C}____________________________________________________________${R}"
-    echo -e "${C}  MTP v1.3 | MEDIA TAIL PLAYER                            ${R}"
+    echo -e "${C}  MTP v1.4 | MEDIA TAIL PLAYER                            ${R}"
     echo -e "${C}____________________________________________________________${R}"
     echo -e "${Y}  4 / 6  : Volume down / up              ${R}"
     echo -e "${Y}  , / .  : Seek -10 / +10 sec            ${R}"
@@ -407,14 +416,57 @@ _check_and_switch() {
     fi
 }
 
+# === WORD FILTER ===
+# Does the file name contain every given word? (case-insensitive, literal; a
+# word with * or ? is used as a glob pattern instead). $1 = name, rest = words.
+_name_matches() {
+    local name="${1,,}" w
+    shift
+    for w in "$@"; do
+        w="${w,,}"
+        if [[ "$w" == *[*?]* ]]; then
+            [[ "$name" == *$w* ]] || return 1
+        else
+            [[ "$name" == *"$w"* ]] || return 1
+        fi
+    done
+    return 0
+}
+
+# Fills MATCHES with the files in the current directory that match all the
+# words ("$@"): newest first, .part files (downloads in progress) before
+# finished media files - the same preference as the no-argument auto-select.
+MATCHES=()
+_find_matches() {
+    local f
+    MATCHES=()
+    while IFS= read -r f; do
+        _name_matches "$f" "$@" && MATCHES+=("$f")
+    done < <(ls -t -- *.part 2>/dev/null)
+    while IFS= read -r f; do
+        _name_matches "$f" "$@" && MATCHES+=("$f")
+    done < <(ls -t -- *.mp4 *.mkv *.webm *.avi *.mp3 *.opus \
+                      *.ogg *.m4a *.flac *.wav 2>/dev/null)
+}
+
 # === FILE SELECTION ===
-if [[ -n "$1" ]]; then
+# one argument that is an existing file (or looks like a path) = that file;
+# any other argument(s) = words for the filter; no argument = newest file
+if [[ $# -eq 1 && ( -f "$1" || "$1" == */* ) ]]; then
     CURRENT_FILE="$1"
     if [[ ! -f "$CURRENT_FILE" ]]; then
         echo -e "${Y}❌ File not found: $CURRENT_FILE${R}"
         exit 1
     fi
     echo -e "${C}📂 File selected from argument${R}"
+elif (( $# > 0 )); then
+    _find_matches "$@"
+    if (( ${#MATCHES[@]} == 0 )); then
+        echo -e "${Y}❌ No file matching: $*${R}"
+        exit 1
+    fi
+    CURRENT_FILE="${MATCHES[0]}"
+    echo -e "${C}🔎 Filter: ${Y}$*${C} - ${#MATCHES[@]} match(es), playing the newest${R}"
 else
     CURRENT_FILE=$(ls -t *.part 2>/dev/null | head -1)
     if [[ -z "$CURRENT_FILE" ]]; then
